@@ -1,0 +1,149 @@
+# Database Architecture
+
+PostgreSQL in every deployed environment; SQLite only for fast local tests.
+Schema changes go through Alembic (`backend/alembic/versions`). Conventions:
+
+* UUID primary keys (`id`), `created_at` / `updated_at` in UTC (`timestamptz`).
+* Money: integer minor units (`*_cents`) plus ISO-4217 `currency`.
+* Percentages: integer basis points (`*_bps`, 10 000 = 100%).
+* Enumerations: `VARCHAR` + `CHECK` constraint (portable, easy to extend).
+* Deterministic constraint and index names (see `app/models/base.py`).
+* Every foreign key states its `ON DELETE` behavior. Financial and legal
+  records use `RESTRICT`, so they cannot be cascaded away.
+* Append-only tables (`audit_logs`, planned `ledger_entries`,
+  `financial_events`) are never updated or deleted by application code.
+
+## 1. Implemented in Phase 1 (migration `0001`)
+
+### Identity and organizations
+
+| Table | Purpose | Key columns and constraints |
+|---|---|---|
+| `users` | Accounts | `email` UNIQUE; `password_hash`; `status` (active/suspended/banned/deactivated); `email_verified_at`; `mfa_secret`, `mfa_enabled`; `token_version` (session revocation); `referred_by_code` |
+| `roles` | Permission roles | `code` UNIQUE: buyer, creator, rights_owner, affiliate, org_admin, moderator, finance_admin, admin |
+| `user_roles` | Multi-role assignment | UNIQUE(`user_id`, `role_id`); `granted_by`, `granted_at` |
+| `email_tokens` | Verification and reset tokens | Only the SHA-256 `token_hash` is stored (UNIQUE); `purpose`; `expires_at`; `used_at` (single use) |
+| `organizations` | Studios, agencies, universities, clubs, vendors | `slug` UNIQUE; `org_type`; `verified_at` |
+| `organization_members` | Membership | UNIQUE(`organization_id`, `user_id`); `member_role` (owner/admin/member/student). Membership never transfers content ownership. |
+
+### Storefronts
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `creator_profiles` | Public storefront (individual or organization-fronted) | `user_id` UNIQUE; `handle` UNIQUE; `categories` and `specialties` (JSON); coarse location only (`city`, `region`, `country_code`, `service_radius_km`); `remote_available`, `travel_available`; `verification_status`; `is_emerging_talent`, `is_featured` (indexed) |
+| `follows` | Followers | UNIQUE(`user_id`, `creator_id`) |
+
+### Media
+
+| Table | Purpose | Key columns and indexes |
+|---|---|---|
+| `media_assets` | Photo or video listing | `creator_id`, `uploaded_by`, `contributor_agreement_id` (the agreement the upload was made under); `media_type`; `status` (processing, pending_review, approved, changes_requested, rejected, disabled, withdrawn, failed); technical metadata (dimensions, duration, fps, `resolution_label`, format, size); `checksum_sha256` and `perceptual_hash` (indexed, for duplicate detection); `scan_status`; location; disclosure flags (editorial-only, AI-generated, materially altered); release flags; `is_free`; counters. Indexes: (status, media_type), (creator_id, status), category, resolution, country, published_at; PostgreSQL GIN full-text index on `to_tsvector('english', search_text)` |
+| `media_files` | Stored binaries per asset | UNIQUE(`asset_id`, `kind`); `kind` (original, preview, thumbnail, poster); `is_public`; `storage_key` |
+| `media_releases` | Model and property releases | `release_type`; `subject_name`; private `document_storage_key`; verification fields |
+| `copyright_declarations` | Uploader's sworn ownership statement | UNIQUE(`asset_id`); rights owner; original author; prior-license disclosure; `declaration_version` + full text; IP and user agent |
+| `collections`, `collection_items` | Buyer collections | UNIQUE(`collection_id`, `asset_id`) |
+| `favorites` | Buyer favorites | UNIQUE(`user_id`, `asset_id`) |
+
+### Licensing
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `license_types` | Buyer-facing license catalog | `code` UNIQUE (free_personal, free_attribution, free_commercial, personal, editorial, standard_commercial, extended_commercial, exclusive, negotiated); flags; `permitted_uses` (JSON); `terms_version`; `terms_markdown` |
+| `revenue_share_rules` | **Versioned** commission configuration | UNIQUE(`code`, `version`); `revenue_model` (nonexclusive/exclusive/free); `creator_bps`; `initial_exclusive_creator_bps`; `affiliate_bps_of_platform`; `net_revenue_deductions` (JSON); CHECK bps ranges. Never updated in place. |
+| `agreement_templates` | **Versioned** contributor agreements (Models A/B/C) | UNIQUE(`code`, `version`); `revenue_share_rule_id`; `body_markdown` + `body_sha256`; default territory, uses, sublicensing, duration, withdrawal terms; `legal_review_status` (draft/under_review/approved/retired) and reviewer |
+| `contributor_agreements` | A creator's executed acceptance | `template_id` (exact version); signer and rights-owner names; terms frozen at signing; `signature_method` (clickwrap/esign_provider); `signature_evidence` (IP, user agent, document hash, environment, e-sign envelope id); `status` (active/superseded/terminated) |
+| `price_listings` | Creator-set prices | UNIQUE(`asset_id`, `license_type_id`, `size_tier`); `price_cents` CHECK ≥ 0; `currency`; `subscription_credit_eligible` |
+| `rights_grants` | Issued licenses (= license certificates) | `certificate_number` UNIQUE; asset, license type, licensee (user/org/name); `source` (free_download, purchase, subscription, exclusive_agreement, negotiated); `is_exclusive`; `territory`, `permitted_uses`; `starts_at`, `ends_at` (NULL = perpetual); price; `terms_version`; immutable `terms_snapshot`; `status`. Index (asset_id, status) for availability checks |
+| `download_entitlements` | Permission to download an original | `rights_grant_id`; `max_downloads`, `download_count`; `expires_at` |
+
+### Trust, safety and audit
+
+| Table | Purpose |
+|---|---|
+| `moderation_decisions` | Every approve/reject/request-changes/disable/restore with reason, moderator and advisory `automated_signals` |
+| `content_appeals` | Creator appeals; must be resolved by a different moderator |
+| `copyright_complaints` | DMCA-style notices with required statements, status workflow (received → under_review → content_disabled → counter_notice_received → restored/closed) and counter-notice |
+| `audit_logs` | Append-only actions log: actor, action, subject, details, IP |
+
+## 2. Planned tables by phase
+
+Each phase ships as its own Alembic migration.
+
+### Phase 2: Monetization
+
+| Table | Purpose |
+|---|---|
+| `orders` | Buyer checkout: status, totals, currency, tax, `stripe_payment_intent_id` UNIQUE, `idempotency_key` UNIQUE |
+| `order_lines` | One asset × license × size tier; price snapshot; FK to the resulting `rights_grants` row |
+| `financial_events` | Raw, immutable provider events (Stripe webhooks) keyed by provider event id UNIQUE, for idempotent processing |
+| `ledger_accounts` | Chart of accounts: platform revenue, `creator_payable:<id>`, `affiliate_payable:<id>`, processor clearing, tax payable, fees expense, refunds |
+| `ledger_entries` | Double-entry journal lines (`journal_id`, `account_id`, `debit_cents`, `credit_cents`). CHECK one side non-zero; deferred check that each journal balances; append-only |
+| `royalty_allocations` | Engine output per order line: rule id and version, deductions, net, pools and per-party amounts, explanation |
+| `payout_accounts` | Stripe Connect account per creator or affiliate: onboarding status, capabilities, country |
+| `payouts` | Transfers and payouts: amount, status, Stripe transfer id UNIQUE, ledger journal |
+| `refunds`, `chargebacks` | Reversal records linked to orders and reversal journals |
+| `tax_profiles` | W-9/W-8 status and 1099-K / DAC7 reporting flags (provider-hosted forms; no raw tax IDs stored by us) |
+| `affiliate_links`, `referrals`, `affiliate_commissions` | Unique codes, attributed signups and conversions, commission rows with fraud status |
+
+### Phase 3: Custom production
+
+`production_projects` (also used by the addendum), `project_requests`
+(customer briefs, including **Request This Shot** with
+`rights_preference`: exclusive/nonexclusive/custom), `proposals`, `bookings`,
+`milestones`, `deliverables`, `deliverable_revisions`, `conversations`,
+`conversation_participants`, `messages`, `attachments`, `notifications`,
+`reviews` (UNIQUE per booking and side), `disputes`, `client_galleries`,
+`gallery_items`, `gallery_access` (hashed password, expiry), `gallery_selections`.
+
+### Phase 4: Partnerships and advanced licensing
+
+`university_partnerships` (organization extension: program type, ambassador,
+referral code), `organization_commission_authorizations` (member-signed),
+`collaborations`, `collaboration_members` (bps shares that must total 10 000,
+signature evidence), `exclusive_deals` (negotiated territory, uses, term,
+minimum guarantee, carve-outs of prior licenses), `esign_envelopes` (provider
+envelope id, status, signed PDF key), `syndication_partners`,
+`syndication_authorizations` (creator opt-in per channel),
+`syndication_transactions`.
+
+### Phase 5: Global scale
+
+`subscription_plans` (versioned), `subscriptions`, `credit_ledger` (grants,
+consumption, expiry), `enterprise_accounts`, `enterprise_contracts`,
+`api_clients` and `api_keys` (hashed), `media_embeddings` (pgvector, for AI
+search), `ai_tags` (source, confidence), `creator_subscriptions`.
+
+### Film Production Exchange (addendum)
+
+| Table | Purpose |
+|---|---|
+| `availability_profiles` | Per-professional settings: categories, project types, service area, travel and remote, rate (or negotiable), minimum booking, `share_calendar` privacy level |
+| `availability_windows` | Public available date ranges. Private calendar events are never stored or exposed; only "available" blocks the professional publishes |
+| `urgent_crew_requests` | Position, location, start time, duration, compensation, requirements, application deadline, contact method, `employer_verified` snapshot |
+| `urgent_crew_applications` | Applicant, note, status |
+| `notification_preferences` | Opt-in per category, radius and channel |
+| `vendor_profiles` | Organization extension for production vendors: categories (catering, transport, security...), service areas, listing tier (free/paid) |
+| `vendor_inquiries` | Inquiries from productions |
+| `rfp_requests` | Bid exchange: specs, budget range, deadline, visibility (public/private) |
+| `rfp_invitations` | Private invitations |
+| `rfp_bids` | Proposal documents (private bucket), price; visible only to the requester and the bidder (row-level checks in the service layer) |
+| `production_packages`, `package_members` | Bundled services; member role and allocation bps; member authorization evidence |
+| `resource_listings`, `resource_inquiries` | Equipment, studio space, props, vehicles (listings and inquiries only until rental terms exist) |
+| `contract_templates`, `contracts`, `contract_parties` | Versioned, counsel-reviewed templates or uploaded custom contracts; signature status; private document storage |
+| `budget_lines`, `expenses`, `vendor_invoices`, `payment_commitments` | Production expense tracking linked to the ledger when paid through approved payment flows |
+| `team_rosters`, `preferred_vendors`, `rebooking_invitations` | Rebooking and saved teams |
+| `business_leads`, `lead_responses`, `saved_leads` | Lead exchange. Contact data is revealed only by the lead owner's action |
+
+## 3. Indexing and scaling notes
+
+* Catalog search: GIN full-text index now; add `pg_trgm` for fuzzy matching,
+  then a dedicated engine (Meilisearch or Typesense) once the catalog passes
+  about 500k assets or relevance tuning needs it. Embeddings (pgvector) back
+  AI search.
+* Duplicate detection compares perceptual hashes in the application today. At
+  scale, move to BK-tree or LSH buckets, or a vector index.
+* Counters (`view_count`, `download_count`) move to an event table plus
+  periodic aggregation when write contention appears.
+* Partition `audit_logs`, `financial_events` and `ledger_entries` by month
+  once they pass tens of millions of rows.
+* Read replica for analytics and admin reporting at the 10k+ user tier.

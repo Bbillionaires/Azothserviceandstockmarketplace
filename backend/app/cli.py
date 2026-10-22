@@ -118,7 +118,7 @@ def cmd_demo(_args) -> None:
         for handle, name, headline, city, region, country, cats in DEMO_CREATORS:
             profile = db.scalar(select(CreatorProfile).where(CreatorProfile.handle == handle))
             if not profile:
-                user = User(email=f"{handle}@demo.local", password_hash=hash_password("demo-password-123"),
+                user = User(email=f"{handle}@example.com", password_hash=hash_password("demo-password-123"),
                             display_name=name, email_verified_at=datetime.now(UTC))
                 db.add(user)
                 db.flush()
