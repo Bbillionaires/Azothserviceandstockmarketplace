@@ -3,7 +3,7 @@
     python -m app.cli seed                         # reference data (idempotent)
     python -m app.cli create-admin EMAIL NAME      # prompts for a password
     python -m app.cli demo                         # demo creators + media (dev only)
-    python -m app.cli run-finance                  # daily: release earnings, payouts, reconciliation
+    python -m app.cli run-finance                  # daily: auto-approvals, earnings, payouts, reconciliation
 """
 
 import argparse
@@ -183,15 +183,19 @@ def cmd_demo(_args) -> None:
 def cmd_run_finance(_args) -> None:
     from app.services import payout_service
     from app.services.payments import get_provider
+    from app.services.production_service import auto_approve_due
 
     with SessionLocal() as db:
         canceled = payout_service.cancel_stale_orders(db)
+        db.commit()
+        approved = auto_approve_due(db)
         db.commit()
         result = payout_service.run_payouts(db, get_provider())
         db.commit()
         run = payout_service.reconcile(db)
         db.commit()
     print(f"Canceled stale orders: {canceled}")
+    print(f"Milestones auto-approved: {approved}")
     print(f"Payouts: {result}")
     print(f"Reconciliation: {run.status} ({len(run.findings)} findings)")
     if run.status != "ok":

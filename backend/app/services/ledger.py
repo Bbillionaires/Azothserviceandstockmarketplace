@@ -8,6 +8,7 @@ Chart of accounts (one row per code and currency):
 | ``tax_payable``              | liability | Sales tax / VAT collected for remittance         |
 | ``creator_payable:<user>``   | liability | Owed to a creator, not yet transferred           |
 | ``affiliate_payable:<user>`` | liability | Owed to a referral partner, not yet transferred  |
+| ``client_funds_held``        | liability | Milestone payments awaiting client approval      |
 | ``platform_revenue``         | revenue   | Platform share net of affiliate commission       |
 | ``fee_recovery``             | revenue   | Processing fees deducted from net revenue        |
 | ``processing_fees``          | expense   | Fees charged by the payment provider             |
@@ -33,6 +34,7 @@ ACCOUNT_TYPES = {
     "tax_payable": AccountType.liability,
     "creator_payable": AccountType.liability,
     "affiliate_payable": AccountType.liability,
+    "client_funds_held": AccountType.liability,
     "platform_revenue": AccountType.revenue,
     "fee_recovery": AccountType.revenue,
     "processing_fees": AccountType.expense,

@@ -49,6 +49,7 @@ from app.models import (
     Order,
     OrderLine,
     OrderLineStatus,
+    OrderPurpose,
     OrderStatus,
     PayoutAccount,
     PayoutAccountStatus,
@@ -279,17 +280,24 @@ def _mirror(lines: list[ledger.Line]) -> list[ledger.Line]:
             for x in lines]
 
 
-def _reverse_earnings(db: Session, ln: OrderLine, journal_id: uuid.UUID) -> None:
+def reverse_earning_rows(db: Session, rows: list[Earning], journal_id: uuid.UUID) -> None:
+    """Reverse unpaid earnings; claw back paid ones with a negative earning."""
     now = utcnow()
-    for e in db.scalars(select(Earning).where(Earning.order_line_id == ln.id, Earning.amount_cents > 0,
-                                              Earning.status != EarningStatus.reversed)):
+    for e in rows:
+        if e.status is EarningStatus.reversed or e.amount_cents <= 0:
+            continue
         already_clawed = db.scalar(select(Earning.id).where(Earning.reverses_earning_id == e.id))
         if e.status in (EarningStatus.pending, EarningStatus.available):
             e.status = EarningStatus.reversed
         elif e.status is EarningStatus.paid and not already_clawed:
-            db.add(Earning(payee_user_id=e.payee_user_id, kind=e.kind, order_line_id=ln.id, amount_cents=-e.amount_cents,
-                           currency=e.currency, status=EarningStatus.available, available_at=now, journal_id=journal_id,
+            db.add(Earning(payee_user_id=e.payee_user_id, kind=e.kind, order_line_id=e.order_line_id,
+                           milestone_id=e.milestone_id, amount_cents=-e.amount_cents, currency=e.currency,
+                           status=EarningStatus.available, available_at=now, journal_id=journal_id,
                            reverses_earning_id=e.id))
+
+
+def _reverse_earnings(db: Session, ln: OrderLine, journal_id: uuid.UUID) -> None:
+    reverse_earning_rows(db, list(db.scalars(select(Earning).where(Earning.order_line_id == ln.id))), journal_id)
 
 
 def _update_order_status(order: Order) -> None:
@@ -334,6 +342,10 @@ def refund_line(db: Session, provider: PaymentProvider | None, ln: OrderLine, re
 
 def dispute_order(db: Session, order: Order, dispute_id: str, dispute_fee: int) -> None:
     """A chargeback pulls the money back: reverse every fulfilled line and suspend its license."""
+    if order.purpose is OrderPurpose.milestone:
+        from app.services.production_service import chargeback_milestone
+
+        chargeback_milestone(db, order, dispute_id)
     for ln in order.lines:
         if ln.status is not OrderLineStatus.fulfilled:
             continue
@@ -355,6 +367,9 @@ def dispute_order(db: Session, order: Order, dispute_id: str, dispute_fee: int) 
 
 def reinstate_dispute(db: Session, order: Order, dispute_id: str) -> None:
     """Dispute won: the funds come back, so restore the allocation and licenses."""
+    if order.purpose is OrderPurpose.milestone:
+        raise ValueError(f"dispute {dispute_id} won on milestone order {order.id}: "
+                         "re-fund the milestone manually with finance review")
     settings = get_settings()
     for ln in order.lines:
         if ln.status is not OrderLineStatus.disputed:
@@ -417,8 +432,15 @@ def handle_event(db: Session, provider: PaymentProvider, event: ProviderEvent) -
             if event.type in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
                 order = _order_for(db, obj)
                 if order and obj.get("payment_status") == "paid":
-                    fulfill_order(db, order, provider.payment_details(order.provider_session_id))
-                    outcome = "fulfilled"
+                    details = provider.payment_details(order.provider_session_id)
+                    if order.purpose is OrderPurpose.milestone:
+                        from app.services.production_service import fund_from_payment
+
+                        fund_from_payment(db, order, details)
+                        outcome = "milestone_funded"
+                    else:
+                        fulfill_order(db, order, details)
+                        outcome = "fulfilled"
             elif event.type in ("checkout.session.expired", "checkout.session.async_payment_failed"):
                 order = _order_for(db, obj)
                 if order and order.status is OrderStatus.pending:
@@ -459,6 +481,11 @@ def _external_refund(db: Session, charge: dict) -> str:
     order = _order_for(db, charge)
     if not order:
         return "ignored"
+    if order.purpose is OrderPurpose.milestone:
+        recorded = sum(r.amount_cents for r in db.scalars(select(Refund).where(Refund.order_id == order.id)))
+        if int(charge.get("amount_refunded", 0)) <= recorded:
+            return "already_recorded"
+        raise ValueError(f"provider-side refund on milestone order {order.id} needs manual review")
     open_lines = [ln for ln in order.lines if ln.status is OrderLineStatus.fulfilled]
     recorded = sum(r.amount_cents for r in db.scalars(select(Refund).where(Refund.order_id == order.id)))
     refunded = int(charge.get("amount_refunded", 0))

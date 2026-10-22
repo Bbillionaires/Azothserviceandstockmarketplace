@@ -23,4 +23,6 @@ export type Order = {
   created_at: string;
   paid_at: string | null;
   lines: OrderLine[];
+  purpose?: string;
+  project_id?: string | null;
 };

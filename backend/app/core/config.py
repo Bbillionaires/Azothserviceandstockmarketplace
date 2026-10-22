@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     earnings_hold_days: int = 14
     min_payout_cents: int = 1000
     referral_attribution_days: int = 365
+    # Custom production: a submitted milestone is approved automatically if the
+    # client neither approves nor requests a revision within this many days.
+    milestone_auto_approve_days: int = 7
+    max_deliverable_mb: int = 4096
 
     # --- Feature flags -----------------------------------------------------
     # Exclusive licensing and payments stay off until agreements are reviewed

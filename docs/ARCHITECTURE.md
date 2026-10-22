@@ -93,7 +93,7 @@ shared request state.
 | 7 | **Payments & ledger** | Stripe Connect, orders, idempotent webhooks, double-entry ledger, payouts, refunds, disputes, referrals, reconciliation | Built (Phase 2) |
 | 8 | **Trust & safety** | Moderation queue, automated advisory signals, appeals, DMCA notices and counter-notices, repeat-infringer tracking | Built |
 | 9 | **Admin control center** | Users and roles, verification, moderation, complaints, versioned commission rules, legal review status, audit log, finance console | Built |
-| 10 | **Production services** | Jobs, proposals, bookings, milestones, deliverables, messaging, reviews, Request This Shot, client galleries | Phase 3 |
+| 10 | **Production services** | Briefs, Request This Shot, matching, proposals, packages, bookings, milestones, deliverables, messaging, notifications, disputes, reviews, client galleries | Built (Phase 3) |
 | 11 | **Partnerships** | Universities and clubs, collaborations, exclusive deals with e-signature, syndication | Phase 4 |
 | 12 | **Subscriptions & enterprise** | Buyer and creator plans, credits, enterprise contracts, API keys | Phase 5 |
 | 13 | **AI services** | Tagging, semantic search, matching, pricing hints, quality and moderation signals | Phase 5 (interfaces now) |
@@ -164,10 +164,12 @@ Azothserviceandstockmarketplace/
 │   │   ├── models/              SQLAlchemy models (users, creators, media, licensing, moderation)
 │   │   ├── schemas/             Pydantic request/response models
 │   │   ├── api/v1/              Routers: auth, creators, agreements, media, search, licenses,
-│   │   │                        library, trust, orders, earnings, admin, admin_finance, public_config
+│   │   │                        library, trust, orders, earnings, production, messages, galleries,
+│   │   │                        admin, admin_finance, public_config
 │   │   └── services/            royalty_engine, rights_availability, media_processing, storage,
 │   │                            scanner, search, licensing_service, media_service, email, audit,
-│   │                            ledger, payment_service, payout_service, referral_service, payments/
+│   │                            ledger, payment_service, payout_service, referral_service, payments/,
+│   │                            production_service, messaging, notify, gallery_service
 │   ├── alembic/versions/        Migration scripts
 │   ├── tests/                   pytest suite (royalties, rights, auth, media flow, admin, video, migrations)
 │   ├── Dockerfile, railway.json Railway deployment (FFmpeg included)
@@ -205,9 +207,9 @@ The addendum extends the platform rather than adding a second site. It reuses:
 |---|---|
 | Users, roles, organizations | Production companies, vendors and crews are organizations; vendor is an `organization_type` |
 | Creator profiles | Become *professional profiles* (categories already include director, sound engineer, cinematographer...) |
-| Production projects (Phase 3) | Urgent Crew, bid exchange, packages, contracts, expenses and dashboards hang off `production_projects` |
-| Proposals and milestones (Phase 3) | Bid exchange submissions are proposals with private visibility |
-| Messaging and notifications (Phase 3) | Urgent Crew alerts, RFP invitations, rebooking invitations |
+| Projects (built in Phase 3) | Urgent Crew, bid exchange, packages, contracts, expenses and dashboards hang off `projects` |
+| Proposals and milestones (built) | Bid exchange submissions reuse confidential proposals and milestone payments |
+| Messaging and notifications (built) | Urgent Crew alerts, RFP invitations, rebooking invitations |
 | Ledger and Stripe Connect (Phase 2) | Package revenue allocation, booking commissions, vendor payments |
 | Royalty engine `split_by_bps` | Team revenue allocation for production packages |
 | Admin, audit, moderation | Employer verification, vendor listings, lead moderation |

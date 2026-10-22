@@ -34,6 +34,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, Timestamps, UUIDPk, str_enum, utcnow
 
 
+class OrderPurpose(str, enum.Enum):
+    license = "license"  # stock media license lines
+    milestone = "milestone"  # funding a custom-production milestone
+
+
 class OrderStatus(str, enum.Enum):
     pending = "pending"  # awaiting payment
     paid = "paid"
@@ -65,6 +70,12 @@ class Order(UUIDPk, Timestamps, Base):
     checkout_url: Mapped[str | None] = mapped_column(Text)
     affiliate_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    purpose: Mapped[OrderPurpose] = mapped_column(
+        str_enum(OrderPurpose, "order_purpose"), default=OrderPurpose.license, server_default="license"
+    )
+    milestone_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("milestones.id", ondelete="RESTRICT"), index=True
+    )
 
     lines: Mapped[list["OrderLine"]] = relationship(
         back_populates="order", cascade="all, delete-orphan", lazy="selectin", order_by="OrderLine.position"
@@ -152,6 +163,9 @@ class JournalKind(str, enum.Enum):
     payout = "payout"
     payout_reversal = "payout_reversal"
     adjustment = "adjustment"
+    service_funding = "service_funding"
+    service_release = "service_release"
+    service_refund = "service_refund"
 
 
 class LedgerJournal(UUIDPk, Base):
@@ -216,6 +230,7 @@ class RoyaltyAllocation(UUIDPk, Base):
 class EarningKind(str, enum.Enum):
     stock_license = "stock_license"
     affiliate_commission = "affiliate_commission"
+    service_milestone = "service_milestone"
 
 
 class EarningStatus(str, enum.Enum):
@@ -238,7 +253,12 @@ class Earning(UUIDPk, Base):
 
     payee_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"))
     kind: Mapped[EarningKind] = mapped_column(str_enum(EarningKind, "earning_kind"))
-    order_line_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("order_lines.id", ondelete="RESTRICT"), index=True)
+    order_line_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("order_lines.id", ondelete="RESTRICT"), index=True
+    )
+    milestone_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("milestones.id", ondelete="RESTRICT"), index=True
+    )
     amount_cents: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(3))
     status: Mapped[EarningStatus] = mapped_column(str_enum(EarningStatus, "earning_status"), default=EarningStatus.pending)
@@ -299,6 +319,8 @@ class RefundReason(str, enum.Enum):
     fraudulent = "fraudulent"
     rights_issue = "rights_issue"
     chargeback = "chargeback"
+    project_canceled = "project_canceled"
+    dispute_resolution = "dispute_resolution"
     other = "other"
 
 
@@ -306,8 +328,13 @@ class Refund(UUIDPk, Base):
     __tablename__ = "refunds"
 
     order_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("orders.id", ondelete="RESTRICT"), index=True)
-    order_line_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("order_lines.id", ondelete="RESTRICT"), unique=True)
-    amount_cents: Mapped[int] = mapped_column(Integer)  # line price + tax returned to the buyer (0 for chargebacks)
+    order_line_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("order_lines.id", ondelete="RESTRICT"), unique=True
+    )
+    milestone_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("milestones.id", ondelete="RESTRICT"), index=True
+    )
+    amount_cents: Mapped[int] = mapped_column(Integer)  # amount + tax returned to the buyer
     currency: Mapped[str] = mapped_column(String(3))
     reason: Mapped[RefundReason] = mapped_column(str_enum(RefundReason, "refund_reason"))
     note: Mapped[str] = mapped_column(Text, default="")

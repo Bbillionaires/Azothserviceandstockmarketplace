@@ -49,6 +49,20 @@ is a configurable placeholder.
 * Referral links with commission paid from the platform share.
 * Finance console with reconciliation.
 
+**Phase 3 (custom production):**
+
+* Production briefs and **Request This Shot**, where clients must choose the
+  rights they want.
+* A creator board, rules-based creator matching, invitations, and confidential
+  proposals with milestone plans.
+* Fixed-price packages on storefronts.
+* Bookings that record the agreed rights and acceptance evidence.
+* Milestone payments held until the client approves, with private deliverable
+  files, revision limits, auto-approval and cancellation rules.
+* Disputes resolved by staff (release, refund or split).
+* Messaging and notifications, and verified two-way reviews.
+* Private client proofing galleries.
+
 See [docs/ROADMAP.md](docs/ROADMAP.md) for status and known limitations.
 Nothing here is production-ready until the legal texts are reviewed, Stripe is
 verified in test mode, and the hardening items in the roadmap are complete.
@@ -108,7 +122,7 @@ npm run dev                                # http://localhost:3000
 ```powershell
 cd backend
 .\.venv\Scripts\Activate.ps1
-pytest                 # royalties, rights, auth, media flow, admin, video, migrations, commerce
+pytest                 # royalties, rights, auth, media, admin, video, migrations, commerce, production
 ruff check .
 
 cd ..\frontend

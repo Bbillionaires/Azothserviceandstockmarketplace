@@ -3,6 +3,8 @@ import { MediaGrid } from "@/components/MediaGrid";
 import { ApiError, api, label, tryApi } from "@/lib/api";
 import type { Creator, MediaCard } from "@/lib/types";
 import { FollowButton } from "./FollowButton";
+import { StorefrontServices } from "./StorefrontServices";
+import type { Package } from "@/lib/production";
 
 export const dynamic = "force-dynamic";
 
@@ -21,10 +23,12 @@ export default async function Storefront({ params }: { params: Promise<{ handle:
     if (e instanceof ApiError && e.status === 404) notFound();
     throw e;
   }
-  const [media, stats] = await Promise.all([
+  const [media, stats, packages, reputation] = await Promise.all([
     tryApi<{ items: MediaCard[] }>(`/search/media?creator=${handle}&sort=newest&page_size=48`, { items: [] }),
     tryApi<{ approved_media: number; total_downloads: number; total_views: number }>(`/creators/${handle}/stats`,
       { approved_media: 0, total_downloads: 0, total_views: 0 }),
+    tryApi<Package[]>(`/creators/${handle}/packages`, []),
+    tryApi(`/creators/${handle}/reputation`, { average: 0, count: 0, completed_projects: 0, reviews: [] }),
   ]);
 
   return (
@@ -62,6 +66,7 @@ export default async function Storefront({ params }: { params: Promise<{ handle:
         <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_300px]">
           <div>
             {c.bio && <p className="whitespace-pre-line text-ink-200">{c.bio}</p>}
+            <div className="mt-8"><StorefrontServices handle={c.handle} name={c.display_name} packages={packages} reputation={reputation} /></div>
             <h2 className="font-display mt-10 mb-4 text-2xl">Portfolio & stock media</h2>
             <MediaGrid items={media.items} empty="No published media yet." />
           </div>
@@ -84,7 +89,7 @@ export default async function Storefront({ params }: { params: Promise<{ handle:
               <div><p className="text-lg font-semibold">{c.follower_count}</p><p className="text-xs text-ink-400">Followers</p></div>
             </div>
             {c.website && <a href={c.website} rel="noopener nofollow ugc" target="_blank" className="block text-gold-300 underline">Website</a>}
-            <p className="text-xs text-ink-400">Booking, messaging and verified reviews arrive with custom production (Phase 3).</p>
+            {reputation.count > 0 && <p><span className="text-gold-300">★ {reputation.average.toFixed(1)}</span> <span className="text-ink-400">({reputation.count} verified reviews)</span></p>}
           </aside>
         </div>
       </div>

@@ -182,8 +182,9 @@ Create a second Railway service from the same repo and root directory with:
 * **Cron schedule:** `17 6 * * *` (daily, 06:17 UTC)
 * The same variables as the API (use Railway shared variables).
 
-The job cancels abandoned checkouts, releases earnings past their hold
-period, pays out available balances, and runs reconciliation. It exits
+The job cancels abandoned checkouts, auto-approves delivered milestones the
+client hasn't answered within `MILESTONE_AUTO_APPROVE_DAYS`, releases earnings
+past their hold period, pays out available balances, and runs reconciliation. It exits
 non-zero when reconciliation finds issues, so Railway marks the run failed and
 alerts you. Finance admins can also run payouts and reconciliation from
 Admin → Finance.

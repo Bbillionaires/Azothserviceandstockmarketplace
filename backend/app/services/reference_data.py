@@ -70,6 +70,12 @@ RULES = [
     ("model_c_free", RevenueModel.free, 0, None, 0, "Model C: free media; no royalty on zero-revenue downloads."),
 ]
 
+# Custom production commission. 85% to the creator is a placeholder business
+# decision; finance admins change it by creating a new rule version.
+SERVICES_RULE = ("services_commission", RevenueModel.service, 8500,
+                 "Custom production: creator receives 85% of each released milestone; the platform pays "
+                 "payment processing fees from its 15% commission.")
+
 DRAFT_BANNER = (
     "> **DRAFT — NOT LEGALLY REVIEWED.** Placeholder text for development only. "
     "Replace with counsel-approved terms before activation.\n\n"
@@ -142,3 +148,9 @@ def seed_reference_data(db: Session) -> None:
                 legal_review_status=LegalReviewStatus.draft,
             ))
     db.commit()
+    code, model, creator_bps, notes = SERVICES_RULE
+    if not db.scalar(select(RevenueShareRule).where(RevenueShareRule.code == code)):
+        db.add(RevenueShareRule(code=code, version=1, revenue_model=model, creator_bps=creator_bps,
+                                initial_exclusive_creator_bps=None, affiliate_bps_of_platform=0,
+                                net_revenue_deductions=[], notes=notes))
+        db.commit()

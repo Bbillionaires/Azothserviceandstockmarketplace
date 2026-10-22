@@ -13,10 +13,13 @@ from app.api.v1 import (
     auth,
     creators,
     earnings,
+    galleries,
     library,
     licenses,
     media,
+    messages,
     orders,
+    production,
     public_config,
     search,
     trust,
@@ -52,8 +55,8 @@ def create_app() -> FastAPI:
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
-    for module in (auth, creators, agreements, media, search, licenses, library, trust, orders, earnings, admin,
-                   admin_finance, public_config):
+    for module in (auth, creators, agreements, media, search, licenses, library, trust, orders, earnings, production,
+                   messages, galleries, admin, admin_finance, public_config):
         app.include_router(module.router, prefix=settings.api_prefix)
 
     @app.get("/health", tags=["ops"])

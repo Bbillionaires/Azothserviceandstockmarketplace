@@ -30,9 +30,12 @@ from app.models import (
     JournalKind,
     LedgerAccount,
     LedgerJournal,
+    Milestone,
+    MilestoneStatus,
     Order,
     OrderLine,
     OrderLineStatus,
+    OrderPurpose,
     OrderStatus,
     Payout,
     PayoutAccount,
@@ -48,7 +51,11 @@ from app.services.payments import PaymentProvider, PaymentProviderError
 
 log = logging.getLogger("payouts")
 
-PAYABLE_PREFIX = {EarningKind.stock_license: "creator_payable", EarningKind.affiliate_commission: "affiliate_payable"}
+PAYABLE_PREFIX = {
+    EarningKind.stock_license: "creator_payable",
+    EarningKind.service_milestone: "creator_payable",
+    EarningKind.affiliate_commission: "affiliate_payable",
+}
 
 
 def release_earnings(db: Session) -> int:
@@ -224,10 +231,17 @@ def reconcile(db: Session, triggered_by=None) -> ReconciliationRun:
     # Every paid order has a sale journal; fulfilled lines have a license and an allocation.
     orders_ok = True
     for order in db.scalars(select(Order).where(Order.status != OrderStatus.pending, Order.status != OrderStatus.canceled)):
-        if not db.scalar(select(LedgerJournal.id).where(LedgerJournal.idempotency_key == f"sale:{order.id}")):
+        milestone_order = order.purpose is OrderPurpose.milestone
+        key = f"milestone-funding:{order.id}" if milestone_order else f"sale:{order.id}"
+        if not db.scalar(select(LedgerJournal.id).where(LedgerJournal.idempotency_key == key)):
             orders_ok = False
             findings.append({"check": "orders_journaled", "order": str(order.id)})
-        if sum(ln.unit_price_cents for ln in order.lines) != order.subtotal_cents or \
+        if milestone_order:
+            m = db.get(Milestone, order.milestone_id)
+            if not m or m.amount_cents != order.subtotal_cents:
+                orders_ok = False
+                findings.append({"check": "order_totals", "order": str(order.id)})
+        elif sum(ln.unit_price_cents for ln in order.lines) != order.subtotal_cents or \
                 sum(ln.tax_cents for ln in order.lines) != order.tax_cents:
             orders_ok = False
             findings.append({"check": "order_totals", "order": str(order.id)})
@@ -238,6 +252,23 @@ def reconcile(db: Session, triggered_by=None) -> ReconciliationRun:
             orders_ok = False
             findings.append({"check": "lines_fulfilled", "line": str(ln.id)})
     checks["orders_consistent"] = orders_ok
+
+    # Funds held for milestones must equal what the ledger says is held.
+    held_ok = True
+    held: dict[str, int] = defaultdict(int)
+    for m in db.scalars(select(Milestone).where(Milestone.status.in_([
+            MilestoneStatus.funded, MilestoneStatus.submitted, MilestoneStatus.revision_requested,
+            MilestoneStatus.disputed]))):
+        held[m.project.currency] += m.amount_cents - m.released_cents - m.refunded_cents
+    currencies = set(held) | {a.currency for a in db.scalars(
+        select(LedgerAccount).where(LedgerAccount.code == "client_funds_held"))}
+    for cur in currencies:
+        bal = ledger.balance(db, "client_funds_held", cur)
+        if bal != held.get(cur, 0):
+            held_ok = False
+            findings.append({"check": "held_funds_match_milestones", "currency": cur, "ledger": bal,
+                             "milestones": held.get(cur, 0)})
+    checks["held_funds_match_milestones"] = held_ok
 
     stuck = db.scalars(select(Payout).where(Payout.status == PayoutStatus.processing,
                                             Payout.created_at < utcnow() - timedelta(hours=1))).all()

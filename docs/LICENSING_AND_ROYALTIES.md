@@ -205,14 +205,15 @@ Rules:
    information returns (for example 1099-NEC for affiliates, if applicable)
    need advice from an accountant.
 
-### Custom production payments (Phase 3)
+### Custom production payments (implemented in Phase 3)
 
-Milestone payments use the same Connect flow: the customer pays a milestone
-upfront, funds stay in the platform's Stripe balance until the deliverable is
-approved (or auto-approved after a review window), then transfer. This is
-described as a *marketplace payment workflow*, **not escrow**. Stripe's limits
-on how long funds can be held, and counsel's view on money transmission and
-escrow terminology, set the maximum hold periods.
+Milestone payments use the same Connect flow: the client pays a milestone
+upfront, the funds stay in the platform's Stripe balance until the deliverable
+is approved (or auto-approved after `MILESTONE_AUTO_APPROVE_DAYS` without a
+response), then the creator's share enters the normal earnings hold and payout
+cycle. This is described as a *marketplace payment workflow*, **not escrow**.
+Stripe's limits on how long funds can be held, and counsel's view on money
+transmission and escrow terminology, set the maximum hold periods.
 
 ## 7. Phase 2 implementation notes
 
@@ -282,3 +283,30 @@ balance. A non-`ok` run exits non-zero for cron alerting.
   Stripe dashboard.
 * Affiliate commissions cover customer acquisition only. Creator-recruitment
   bonuses are not built yet.
+
+## 8. Custom production money flow (Phase 3)
+
+| Event | Journal (`kind`) | Entries |
+|---|---|---|
+| Client funds a milestone | `service_funding` | Dr clearing (total − fee), Dr processing_fees; Cr tax_payable, Cr **client_funds_held** (amount) |
+| Client approves (or auto-approval) | `service_release` | Dr client_funds_held; Cr creator_payable (creator share), Cr platform_revenue (commission) |
+| Creator refunds / dispute refund | `service_refund` | Dr client_funds_held, Dr tax_payable (pro rata); Cr clearing |
+| Dispute split | release + refund | Creator part released, remainder refunded |
+| Card chargeback | `dispute` | Held funds (or released shares and earnings) reversed against clearing |
+
+* **Commission** comes from the versioned `services_commission` rule (seeded at
+  85% creator / 15% platform, a placeholder business decision). Each project
+  snapshots the rule version at booking. Finance admins change it by creating
+  a new version.
+* **Processing fees** on milestone payments are paid by the platform out of its
+  commission (`services_commission` has no net-revenue deductions).
+* Released creator shares become `service_milestone` earnings with the same
+  hold period, payout, clawback and reconciliation as license royalties.
+* Reconciliation adds a check that the `client_funds_held` balance equals the
+  amount currently held across funded, submitted, revision-requested and
+  disputed milestones.
+* **Not automated (flagged for finance review):** a duplicate payment for an
+  already-funded milestone, a provider-side refund on a milestone payment, and
+  a chargeback that the platform later wins. These are stored as failed
+  payment events and appear in Admin → Finance.
+* Referral commissions do not apply to bookings yet.

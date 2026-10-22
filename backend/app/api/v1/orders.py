@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import current_user, verified_user
 from app.core.rate_limit import limiter
-from app.models import FileKind, LicenseType, MediaAsset, Order, OrderStatus, RightsGrant, User
+from app.models import FileKind, LicenseType, MediaAsset, Milestone, Order, OrderStatus, RightsGrant, User
 from app.schemas.commerce import OrderIn, OrderOut
 from app.services import media_service as ms
 from app.services import payment_service as ps
@@ -35,7 +35,9 @@ def order_out(db: Session, order: Order) -> dict:
     return {"id": order.id, "status": order.status.value, "currency": order.currency,
             "subtotal_cents": order.subtotal_cents, "tax_cents": order.tax_cents, "total_cents": order.total_cents,
             "checkout_url": order.checkout_url if order.status is OrderStatus.pending else None,
-            "created_at": order.created_at, "paid_at": order.paid_at, "lines": lines}
+            "created_at": order.created_at, "paid_at": order.paid_at, "lines": lines,
+            "purpose": order.purpose.value,
+            "project_id": db.get(Milestone, order.milestone_id).project_id if order.milestone_id else None}
 
 
 @router.post("/orders", response_model=OrderOut, status_code=201)

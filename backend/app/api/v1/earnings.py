@@ -17,6 +17,7 @@ from app.models import (
     EarningStatus,
     LicenseType,
     MediaAsset,
+    Milestone,
     Order,
     OrderLine,
     OrderStatus,
@@ -25,6 +26,7 @@ from app.models import (
     Referral,
     ReferralCode,
     ReferralStatus,
+    RevenueShareRule,
     RoyaltyAllocation,
     User,
 )
@@ -74,16 +76,28 @@ def _earning_rows(db: Session, user: User, month: str | None, page: int, page_si
     rows = db.scalars(stmt.order_by(Earning.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     out = []
     for e in rows:
-        line = db.get(OrderLine, e.order_line_id)
-        asset = db.get(MediaAsset, line.asset_id)
-        alloc = db.scalar(select(RoyaltyAllocation).where(RoyaltyAllocation.order_line_id == line.id))
+        if e.order_line_id:
+            line = db.get(OrderLine, e.order_line_id)
+            asset = db.get(MediaAsset, line.asset_id)
+            alloc = db.scalar(select(RoyaltyAllocation).where(RoyaltyAllocation.order_line_id == line.id))
+            title, license_name, gross = (asset.title if asset else "",
+                                          db.get(LicenseType, line.license_type_id).name, line.unit_price_cents)
+            rule, explanation = (f"{alloc.rule_code} v{alloc.rule_version}" if alloc else ""), (alloc.explanation
+                                                                                            if alloc else [])
+        else:
+            m = db.get(Milestone, e.milestone_id)
+            project = m.project
+            rule_row = db.get(RevenueShareRule, project.commission_rule_id)
+            title, license_name, gross = f"{project.title}: {m.title}", "Custom production", m.released_cents
+            rule = f"{rule_row.code} v{rule_row.version}"
+            explanation = [f"Milestone released: {m.released_cents / 100:,.2f} {e.currency}",
+                           f"Creator share ({rule_row.creator_bps / 100:g}%): {abs(e.amount_cents) / 100:,.2f}",
+                           f"Rule: {rule}"]
         out.append({
             "id": e.id, "kind": e.kind.value, "status": e.status.value, "amount_cents": e.amount_cents,
             "currency": e.currency, "available_at": e.available_at, "created_at": e.created_at,
-            "asset_title": asset.title if asset else "", "license_name": db.get(LicenseType, line.license_type_id).name,
-            "gross_cents": line.unit_price_cents,
-            "rule": f"{alloc.rule_code} v{alloc.rule_version}" if alloc else "",
-            "explanation": alloc.explanation if alloc else [], "is_clawback": e.amount_cents < 0,
+            "asset_title": title, "license_name": license_name, "gross_cents": gross, "rule": rule,
+            "explanation": explanation, "is_clawback": e.amount_cents < 0,
         })
     return out, total
 

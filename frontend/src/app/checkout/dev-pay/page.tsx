@@ -20,7 +20,8 @@ function DevPay() {
   const finish = async (outcome: "paid" | "expired") => {
     try {
       await api(`/payments/dev/complete/${id}?outcome=${outcome}`, { method: "POST" });
-      router.push(outcome === "paid" ? `/checkout/success?order=${id}` : `/cart?canceled=${id}`);
+      if (order?.project_id) router.push(`/projects/${order.project_id}`);
+      else router.push(outcome === "paid" ? `/checkout/success?order=${id}` : `/cart?canceled=${id}`);
     } catch (e) {
       setError((e as Error).message);
     }

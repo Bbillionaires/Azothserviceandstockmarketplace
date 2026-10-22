@@ -90,15 +90,31 @@ Each phase ships as its own Alembic migration.
 Still planned for monetization: `tax_profiles` (W-9/W-8 status via Stripe)
 and creator-recruitment bonus tables.
 
-### Phase 3: Custom production
+### Phase 3: Custom production (implemented, migration `0003`)
 
-`production_projects` (also used by the addendum), `project_requests`
-(customer briefs, including **Request This Shot** with
-`rights_preference`: exclusive/nonexclusive/custom), `proposals`, `bookings`,
-`milestones`, `deliverables`, `deliverable_revisions`, `conversations`,
-`conversation_participants`, `messages`, `attachments`, `notifications`,
-`reviews` (UNIQUE per booking and side), `disputes`, `client_galleries`,
-`gallery_items`, `gallery_access` (hashed password, expiry), `gallery_selections`.
+| Table | Purpose |
+|---|---|
+| `project_requests` | Client briefs, including **Request This Shot** (`kind = shot_request`): category, deliverables, coarse location, remote OK, budget range, deadline, required `rights_preference` (exclusive/nonexclusive/custom), visibility (public/invite-only), status |
+| `request_invitations` | Direct invitations / assignments to specific creators, UNIQUE(request, creator) |
+| `service_packages` | Fixed-price storefront offers with delivery days, revisions and rights terms |
+| `proposals` | Bids, UNIQUE(request, creator); milestone plan (JSON, sums to total), rights type and terms; visible only to the client and the bidder |
+| `projects` | Bookings: client, creator, source (proposal or package), agreed rights snapshot, **acceptance evidence** (who/when/IP/terms), commission rule version, status |
+| `milestones` | Amount, due date, status (unfunded → funded → submitted ⇄ revision_requested → approved / refunded / canceled / disputed), auto-approve time, released and refunded amounts |
+| `deliverables` | Private files per milestone (checksum, size); never added to the stock catalog |
+| `revision_requests` | Client change requests (counted against included revisions) |
+| `conversations`, `conversation_participants`, `messages` | One conversation per pair and subject (request, project or direct); read markers |
+| `notifications` | In-app notifications (key events also emailed) |
+| `reviews` | Verified reviews: only on completed projects, once per direction, 1–5 rating, moderator can hide |
+| `project_disputes` | Milestone disputes with previous state, resolution (release/refund/split with creator share) |
+| `client_galleries`, `gallery_items`, `gallery_comments` | Private proofing galleries: secret link token, optional password, expiry, selection limit, download permission; items with private originals and watermarked proofs; favorites, selections, comments and revision requests |
+
+Columns added to Phase 2 tables: `orders.purpose` (license/milestone) and
+`orders.milestone_id`; `earnings.milestone_id` (and `order_line_id` now
+nullable); `refunds.milestone_id` (and `order_line_id` now nullable). New enum
+values: `service` revenue model, `service_milestone` earnings,
+`service_funding`/`service_release`/`service_refund` journals,
+`project_canceled`/`dispute_resolution` refund reasons. Still planned:
+gallery print orders and add-on license purchases from galleries.
 
 ### Phase 4: Partnerships and advanced licensing
 

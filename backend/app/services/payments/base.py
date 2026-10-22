@@ -13,6 +13,7 @@ class CheckoutItem:
     name: str
     description: str
     unit_amount_cents: int
+    tax_code: str = "txcd_10000000"  # electronically supplied services (licenses)
 
 
 @dataclass(frozen=True)

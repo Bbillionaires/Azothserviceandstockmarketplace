@@ -59,7 +59,7 @@ class StripeProvider:
                         "unit_amount": item.unit_amount_cents,
                         # Digital license; Stripe Tax uses this product tax code.
                         "product_data": {"name": item.name[:250], "description": item.description[:500],
-                                         "tax_code": "txcd_10000000"},
+                                         "tax_code": item.tax_code},
                         "tax_behavior": "exclusive",
                     },
                 }

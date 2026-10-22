@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert } from "@/components/Alert";
 import { api, label } from "@/lib/api";
 import { hasRole, useSession } from "@/lib/session";
+import { DisputesPanel } from "./DisputesPanel";
 import { FinancePanel } from "./FinancePanel";
 
 type QueueItem = {
@@ -14,7 +15,7 @@ type QueueItem = {
 };
 type Complaint = { id: string; asset_id: string; complainant_name: string; work: string; status: string; counter_notice: unknown; created_at: string };
 type Appeal = { id: string; asset_id: string; action: string; reason: string; statement: string };
-type Tab = "queue" | "complaints" | "appeals" | "stats" | "finance";
+type Tab = "queue" | "complaints" | "appeals" | "stats" | "finance" | "disputes";
 
 export default function AdminPage() {
   const { user, loading } = useSession();
@@ -51,6 +52,7 @@ export default function AdminPage() {
   const tabs: [Tab, string][] = [
     ...(hasRole(user, "moderator") ? [["queue", `Review queue (${queue.length})`], ["complaints", `Copyright (${complaints.length})`],
       ["appeals", `Appeals (${appeals.length})`], ["stats", "Overview"]] as [Tab, string][] : []),
+    ["disputes", "Project disputes"],
     ...(hasRole(user, "finance_admin") ? [["finance", "Finance"]] as [Tab, string][] : []),
   ];
   const current = tab ?? tabs[0][0];
@@ -139,6 +141,7 @@ export default function AdminPage() {
       )}
 
       {current === "finance" && <FinancePanel />}
+      {current === "disputes" && <DisputesPanel />}
 
       {current === "stats" && stats && (
         <pre className="card mt-6 overflow-x-auto p-5 text-sm text-ink-200">{JSON.stringify(stats, null, 2)}</pre>

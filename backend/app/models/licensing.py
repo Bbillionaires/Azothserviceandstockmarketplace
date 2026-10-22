@@ -60,6 +60,7 @@ class RevenueModel(str, enum.Enum):
     nonexclusive = "nonexclusive"  # Model A
     exclusive = "exclusive"  # Model B
     free = "free"  # Model C
+    service = "service"  # custom production / bookings commission
 
 
 class RevenueShareRule(UUIDPk, Base):

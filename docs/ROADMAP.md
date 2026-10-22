@@ -73,6 +73,26 @@ but nobody has run a real test-mode payment end to end yet. Do that in Stripe
 test mode before enabling `FEATURE_PAID_LICENSING` in production (see
 DEPLOYMENT.md §6).
 
+## 2c. Phase 3 status (custom production)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Custom project posting | ✅ | Briefs with category, deliverables, location, budget, deadline, rights preference, public or invite-only |
+| Request This Shot | ✅ | Shot requests with required rights choice (exclusive / nonexclusive / custom); creator board with location, category, budget and deadline filters |
+| Creator matching | ✅ | Rules-based: skills vs. service category, city/country, remote and travel, verification, verified rating and completed projects, emerging talent within budget |
+| Proposals | ✅ | Milestone plans, delivery time, revisions, rights terms; confidential per bidder; accept / decline / withdraw; invitations |
+| Booking | ✅ | From accepted proposals or fixed-price packages; acceptance evidence and rights snapshot recorded |
+| Messaging | ✅ | Per project, per bid and direct-from-storefront conversations; unread counts; notifications |
+| Project milestones | ✅ | Fund (Stripe Checkout), deliver private files, submit, revision requests (limited), approve and release, auto-approve, add paid milestones |
+| Cancellation handling | ✅ | Unfunded projects cancel freely; funded milestones need a creator refund or a dispute |
+| Disputes | ✅ | Either party opens; funds frozen; staff resolve by release, refund or split |
+| Reviews | ✅ | Verified (completed projects only), both directions, shown on storefronts; moderators can hide |
+| Client galleries | ✅ | Secret link, optional password, expiry, watermarked proofs, favorites, selections with limit, comments, revision requests, approval, optional original downloads |
+| Gallery add-on licensing and print orders | ✗ | Postponed (print partner integration) |
+
+Commissioned deliverables are stored privately and there is no code path that
+publishes them to the stock catalog.
+
 ## 3. Phased schedule
 
 Estimates assume one senior full-stack developer with AI assistance and part-time
@@ -83,7 +103,7 @@ design and QA. Calendar weeks, not effort.
 | **1. Foundation** | Built in this delivery | (done) | — |
 | 1.5 Hardening | Worker queue, direct uploads, Redis rate limits, email provider, Sentry, backups, WCAG audit, staging environment, legal texts | 2–3 weeks | 3 weeks |
 | **2. Monetization** | Built (pending live Stripe test-mode verification) | (done) | — |
-| **3. Custom production** | Project briefs, Request This Shot, proposals, booking, messaging, milestones, deliverables, reviews, disputes, client galleries, creator matching (rules-based) | 8–10 weeks | ~20 weeks |
+| **3. Custom production** | Built | (done) | — |
 | Addendum: immediate | Talent availability, Urgent Crew, vendor profiles, production bid requests | 4–6 weeks | ~26 weeks |
 | **4. Partnerships and advanced licensing** | University and club programs, collaborations, exclusive deals and e-signature, rights carve-outs, syndication | 6–8 weeks | ~34 weeks |
 | Addendum: second release | Production packages, rebooking, staffing dashboards, vendor shortlists | 4–5 weeks | ~39 weeks |
@@ -99,7 +119,7 @@ Buyer and creator subscriptions; enterprise contracts and API; exclusive
 licensing (legal gate); syndication; AI tagging, search and pricing
 (manual keywords and Postgres FTS are enough at launch); university program
 tooling (run partnerships manually with referral codes first); client
-galleries; collaborations; print-order integrations; multi-currency and
+gallery print orders; collaborations; print-order integrations; multi-currency and
 localization; advanced analytics; resource rentals; contract workflows; expense
 management; recurring affiliate commissions.
 

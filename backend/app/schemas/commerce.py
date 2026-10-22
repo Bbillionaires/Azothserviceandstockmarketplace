@@ -39,6 +39,8 @@ class OrderOut(BaseModel):
     created_at: datetime
     paid_at: datetime | None
     lines: list[OrderLineOut]
+    purpose: str = "license"
+    project_id: uuid.UUID | None = None
 
 
 class EarningOut(BaseModel):

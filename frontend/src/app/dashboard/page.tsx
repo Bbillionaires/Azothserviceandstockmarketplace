@@ -9,12 +9,15 @@ import { useSession } from "@/lib/session";
 import type { AgreementTemplate, Creator, MediaDetail, Page, RightsGrant } from "@/lib/types";
 import { AgreementsPanel } from "./AgreementsPanel";
 import { EarningsPanel } from "./EarningsPanel";
+import { GalleriesPanel } from "./GalleriesPanel";
+import { PackagesPanel } from "./PackagesPanel";
+import { ProjectsPanel } from "./ProjectsPanel";
 import { OrdersPanel } from "./OrdersPanel";
 import { ReferralsPanel } from "./ReferralsPanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { StorefrontForm } from "./StorefrontForm";
 
-type Tab = "media" | "earnings" | "storefront" | "agreements" | "orders" | "licenses" | "referrals" | "security";
+type Tab = "media" | "projects" | "packages" | "galleries" | "earnings" | "storefront" | "agreements" | "orders" | "licenses" | "referrals" | "security";
 
 const STATUS_STYLE: Record<string, string> = {
   approved: "text-emerald-300",
@@ -76,9 +79,10 @@ export default function Dashboard() {
   const active = new Set(signed.filter((s) => s.status === "active").map((s) => s.template_code));
   const counts = media.reduce<Record<string, number>>((acc, m) => ({ ...acc, [m.status]: (acc[m.status] ?? 0) + 1 }), {});
   const tabs: [Tab, string][] = creator
-    ? [["media", "My media"], ["earnings", "Earnings"], ["storefront", "Storefront"], ["agreements", "Agreements"],
+    ? [["media", "My media"], ["projects", "Projects"], ["packages", "Packages"], ["galleries", "Client galleries"],
+       ["earnings", "Earnings"], ["storefront", "Storefront"], ["agreements", "Agreements"],
        ["orders", "Purchases"], ["licenses", "My licenses"], ["referrals", "Referrals"], ["security", "Security"]]
-    : [["storefront", "Open a storefront"], ["orders", "Purchases"], ["licenses", "My licenses"],
+    : [["projects", "Projects"], ["storefront", "Open a storefront"], ["orders", "Purchases"], ["licenses", "My licenses"],
        ...(user.roles.includes("affiliate") ? [["earnings", "Earnings"] as [Tab, string]] : []),
        ["referrals", "Referrals"], ["security", "Security"]];
   const current = tabs.some(([t]) => t === tab) ? tab : tabs[0][0];
@@ -196,6 +200,9 @@ export default function Dashboard() {
         )}
         {current === "security" && <SecurityPanel />}
         {current === "earnings" && <EarningsPanel />}
+        {current === "projects" && <ProjectsPanel isCreator={!!creator} />}
+        {current === "packages" && creator && <PackagesPanel />}
+        {current === "galleries" && creator && <GalleriesPanel />}
         {current === "orders" && <OrdersPanel />}
         {current === "referrals" && <ReferralsPanel verified={user.email_verified} />}
       </div>
