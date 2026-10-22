@@ -1,0 +1,23 @@
+[project]
+name = "marketplace-api"
+version = "0.1.0"
+description = "Media licensing & production marketplace API (powered by Azoth Digital)"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
+log_level = "WARNING"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]  # FastAPI dependency injection uses calls in defaults
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/versions/*" = ["E501"]
+"app/models/__init__.py" = ["F401"]
