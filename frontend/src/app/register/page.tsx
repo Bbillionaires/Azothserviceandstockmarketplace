@@ -6,6 +6,7 @@ import { Suspense, useState } from "react";
 import { Alert } from "@/components/Alert";
 import { AuthShell } from "@/components/AuthShell";
 import { api } from "@/lib/api";
+import { storedReferral } from "@/lib/cart";
 import { useSession } from "@/lib/session";
 
 function RegisterForm() {
@@ -21,7 +22,7 @@ function RegisterForm() {
     setBusy(true);
     setError("");
     try {
-      await api("/auth/register", { method: "POST", json: { ...form, referral_code: params.get("ref") || undefined } });
+      await api("/auth/register", { method: "POST", json: { ...form, referral_code: params.get("ref") || storedReferral() || undefined } });
       await refresh();
       router.push("/dashboard?welcome=1");
     } catch (err) {

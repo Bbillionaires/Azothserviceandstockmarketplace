@@ -88,11 +88,11 @@ shared request state.
 | 2 | **Storefronts & discovery** | Creator/studio storefronts, follow, location- and specialty-based discovery, emerging talent | Built |
 | 3 | **Media catalog** | Upload, validation, processing, renditions, metadata, releases, collections, favorites | Built |
 | 4 | **Search** | Filters, facets, PostgreSQL full-text, natural-language filter extraction | Built (AI search: Phase 5) |
-| 5 | **Licensing** | License catalog, versioned contributor agreements, creator pricing, rights grants, certificates, rights availability | Built (paid checkout: Phase 2) |
-| 6 | **Royalty engine** | Pure, tested revenue-split calculations (Models A/B/C, affiliates, collaborators) | Built, not yet wired to payments |
-| 7 | **Payments & ledger** | Stripe Connect, orders, idempotent webhooks, double-entry ledger, payouts, refunds, reconciliation | Phase 2 |
+| 5 | **Licensing** | License catalog, versioned contributor agreements, creator pricing, rights grants, certificates, rights availability | Built |
+| 6 | **Royalty engine** | Pure, tested revenue-split calculations (Models A/B/C, affiliates, collaborators) | Built; applied to every paid order line |
+| 7 | **Payments & ledger** | Stripe Connect, orders, idempotent webhooks, double-entry ledger, payouts, refunds, disputes, referrals, reconciliation | Built (Phase 2) |
 | 8 | **Trust & safety** | Moderation queue, automated advisory signals, appeals, DMCA notices and counter-notices, repeat-infringer tracking | Built |
-| 9 | **Admin control center** | Users and roles, verification, moderation, complaints, versioned commission rules, legal review status, audit log | Built (finance screens: Phase 2) |
+| 9 | **Admin control center** | Users and roles, verification, moderation, complaints, versioned commission rules, legal review status, audit log, finance console | Built |
 | 10 | **Production services** | Jobs, proposals, bookings, milestones, deliverables, messaging, reviews, Request This Shot, client galleries | Phase 3 |
 | 11 | **Partnerships** | Universities and clubs, collaborations, exclusive deals with e-signature, syndication | Phase 4 |
 | 12 | **Subscriptions & enterprise** | Buyer and creator plans, credits, enterprise contracts, API keys | Phase 5 |
@@ -164,9 +164,10 @@ Azothserviceandstockmarketplace/
 │   │   ├── models/              SQLAlchemy models (users, creators, media, licensing, moderation)
 │   │   ├── schemas/             Pydantic request/response models
 │   │   ├── api/v1/              Routers: auth, creators, agreements, media, search, licenses,
-│   │   │                        library, trust, admin, public_config
+│   │   │                        library, trust, orders, earnings, admin, admin_finance, public_config
 │   │   └── services/            royalty_engine, rights_availability, media_processing, storage,
-│   │                            scanner, search, licensing_service, media_service, email, audit
+│   │                            scanner, search, licensing_service, media_service, email, audit,
+│   │                            ledger, payment_service, payout_service, referral_service, payments/
 │   ├── alembic/versions/        Migration scripts
 │   ├── tests/                   pytest suite (royalties, rights, auth, media flow, admin, video, migrations)
 │   ├── Dockerfile, railway.json Railway deployment (FFmpeg included)

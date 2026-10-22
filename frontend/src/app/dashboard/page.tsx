@@ -8,10 +8,13 @@ import { api, label, money } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import type { AgreementTemplate, Creator, MediaDetail, Page, RightsGrant } from "@/lib/types";
 import { AgreementsPanel } from "./AgreementsPanel";
+import { EarningsPanel } from "./EarningsPanel";
+import { OrdersPanel } from "./OrdersPanel";
+import { ReferralsPanel } from "./ReferralsPanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { StorefrontForm } from "./StorefrontForm";
 
-type Tab = "media" | "storefront" | "agreements" | "licenses" | "security";
+type Tab = "media" | "earnings" | "storefront" | "agreements" | "orders" | "licenses" | "referrals" | "security";
 
 const STATUS_STYLE: Record<string, string> = {
   approved: "text-emerald-300",
@@ -52,6 +55,11 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t) setTab(t as Tab);
+  }, []);
+
+  useEffect(() => {
     if (!loading && !user) router.push("/login?next=/dashboard");
     if (user) load();
   }, [user, loading, router, load]);
@@ -68,8 +76,11 @@ export default function Dashboard() {
   const active = new Set(signed.filter((s) => s.status === "active").map((s) => s.template_code));
   const counts = media.reduce<Record<string, number>>((acc, m) => ({ ...acc, [m.status]: (acc[m.status] ?? 0) + 1 }), {});
   const tabs: [Tab, string][] = creator
-    ? [["media", "My media"], ["storefront", "Storefront"], ["agreements", "Agreements"], ["licenses", "My licenses"], ["security", "Security"]]
-    : [["storefront", "Open a storefront"], ["licenses", "My licenses"], ["security", "Security"]];
+    ? [["media", "My media"], ["earnings", "Earnings"], ["storefront", "Storefront"], ["agreements", "Agreements"],
+       ["orders", "Purchases"], ["licenses", "My licenses"], ["referrals", "Referrals"], ["security", "Security"]]
+    : [["storefront", "Open a storefront"], ["orders", "Purchases"], ["licenses", "My licenses"],
+       ...(user.roles.includes("affiliate") ? [["earnings", "Earnings"] as [Tab, string]] : []),
+       ["referrals", "Referrals"], ["security", "Security"]];
   const current = tabs.some(([t]) => t === tab) ? tab : tabs[0][0];
 
   return (
@@ -107,7 +118,7 @@ export default function Dashboard() {
         </dl>
       )}
       {creator && (
-        <p className="mt-3 text-xs text-ink-400">Earnings, payouts and royalty statements arrive with paid licensing (Phase 2). Balances are always calculated by the server ledger.</p>
+        <p className="mt-3 text-xs text-ink-400">Earnings balances are calculated by the server ledger; see the Earnings tab for statements and payouts.</p>
       )}
 
       <div role="tablist" aria-label="Dashboard sections" className="mt-10 flex flex-wrap gap-2 border-b border-ink-800">
@@ -184,6 +195,9 @@ export default function Dashboard() {
           )
         )}
         {current === "security" && <SecurityPanel />}
+        {current === "earnings" && <EarningsPanel />}
+        {current === "orders" && <OrdersPanel />}
+        {current === "referrals" && <ReferralsPanel verified={user.email_verified} />}
       </div>
     </div>
   );

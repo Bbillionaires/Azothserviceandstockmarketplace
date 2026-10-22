@@ -77,28 +77,56 @@ def issue_free_license(
         if ent:
             return existing, ent
 
-    now = datetime.now(UTC)
-    requested = RightsScope.build(["WORLDWIDE"], lt.permitted_uses, now, None, exclusive=False)
-    availability = check_availability(active_scopes(db, asset.id), requested)
-    if not availability.available:
+    if not rights_available(db, asset.id, lt):
         raise HTTPException(status.HTTP_409_CONFLICT, "These rights are no longer available for this media")
+    grant, ent = issue_grant(
+        db, user=user, asset=asset, license_type=lt, size_tier=listing.size_tier,
+        licensee_name=licensee_name or user.display_name, source=GrantSource.free_download,
+        price_cents=0, currency=listing.currency,
+    )
+    audit.record(db, "license.free_issued", user.id, "rights_grant", grant.id, ip,
+                 certificate=grant.certificate_number, asset_id=asset.id, license=lt.code)
+    db.flush()
+    return grant, ent
 
+
+def rights_available(db: Session, asset_id, lt: LicenseType) -> bool:
+    requested = RightsScope.build(["WORLDWIDE"], lt.permitted_uses or ["ALL"], datetime.now(UTC), None,
+                                  exclusive=lt.is_exclusive)
+    return check_availability(active_scopes(db, asset_id), requested).available
+
+
+def issue_grant(
+    db: Session,
+    *,
+    user: User,
+    asset: MediaAsset,
+    license_type: LicenseType,
+    size_tier: str,
+    licensee_name: str,
+    source: GrantSource,
+    price_cents: int,
+    currency: str,
+    max_downloads: int = 10,
+) -> tuple[RightsGrant, DownloadEntitlement]:
+    """Create the license certificate and its download entitlement."""
+    lt = license_type
     creator = db.get(CreatorProfile, asset.creator_id)
     grant = RightsGrant(
         certificate_number=new_certificate_number(),
         asset_id=asset.id,
         license_type_id=lt.id,
         licensee_user_id=user.id,
-        licensee_name=licensee_name or user.display_name,
-        source=GrantSource.free_download,
-        is_exclusive=False,
+        licensee_name=licensee_name,
+        source=source,
+        is_exclusive=lt.is_exclusive,
         territory=["WORLDWIDE"],
         permitted_uses=lt.permitted_uses,
-        size_tier=listing.size_tier,
-        starts_at=now,
+        size_tier=size_tier,
+        starts_at=datetime.now(UTC),
         ends_at=None,
-        price_cents=0,
-        currency=listing.currency,
+        price_cents=price_cents,
+        currency=currency,
         terms_version=lt.terms_version,
         terms_snapshot={
             "license_code": lt.code,
@@ -114,11 +142,10 @@ def issue_free_license(
     )
     db.add(grant)
     db.flush()
-    ent = DownloadEntitlement(rights_grant_id=grant.id, user_id=user.id, asset_id=asset.id, max_downloads=10)
+    ent = DownloadEntitlement(rights_grant_id=grant.id, user_id=user.id, asset_id=asset.id,
+                              max_downloads=max_downloads)
     db.add(ent)
     asset.download_count += 1
-    audit.record(db, "license.free_issued", user.id, "rights_grant", grant.id, ip,
-                 certificate=grant.certificate_number, asset_id=asset.id, license=lt.code)
     db.flush()
     return grant, ent
 

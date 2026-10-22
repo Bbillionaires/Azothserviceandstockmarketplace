@@ -144,7 +144,7 @@ financial risks are modeled.
   will run it inside the same database transaction that inserts the grant,
   with a row lock on the asset, to prevent races.
 
-## 6. Payment and payout workflow (Phase 2)
+## 6. Payment and payout workflow (implemented in Phase 2)
 
 Provider: **Stripe Connect** with **Express** connected accounts, using
 **separate charges and transfers**. That model is required because one sale can
@@ -213,3 +213,72 @@ approved (or auto-approved after a review window), then transfer. This is
 described as a *marketplace payment workflow*, **not escrow**. Stripe's limits
 on how long funds can be held, and counsel's view on money transmission and
 escrow terminology, set the maximum hold periods.
+
+## 7. Phase 2 implementation notes
+
+Code: `app/services/payment_service.py` (orders, fulfillment, refunds,
+disputes, webhook events), `app/services/ledger.py` (double-entry ledger),
+`app/services/payout_service.py` (hold release, payouts, reconciliation),
+`app/services/referral_service.py`, and `app/services/payments/` (Stripe and
+fake provider adapters). 21 tests in `tests/test_commerce.py` plus the engine
+tests.
+
+### Chart of accounts
+
+| Code | Type | Meaning |
+|---|---|---|
+| `clearing:<provider>` | asset | Money in the provider balance (Stripe) |
+| `tax_payable` | liability | Tax collected for remittance |
+| `creator_payable:<user>` | liability | Owed to a creator, not yet transferred |
+| `affiliate_payable:<user>` | liability | Owed to a referral partner |
+| `platform_revenue` | revenue | Platform share after affiliate commission |
+| `fee_recovery` | revenue | Processing fees deducted from net revenue before the split |
+| `processing_fees` | expense | Fees charged by the provider |
+| `refund_losses` | expense | Dispute fees and other absorbed losses |
+
+### Journals
+
+| Event | Entries |
+|---|---|
+| Sale | Dr clearing (total − fee), Dr processing_fees (fee); Cr tax_payable, Cr creator_payable, Cr affiliate_payable, Cr platform_revenue, Cr fee_recovery |
+| Refund (per line, full) | Exact mirror of the line's credits; Cr clearing (price + tax). The provider keeps its original fee, so the platform absorbs it |
+| Chargeback | Same reversal as a refund, plus Dr refund_losses / Cr clearing for the dispute fee; licenses are revoked |
+| Dispute won | Re-posts the line credits against clearing; licenses and earnings are restored (new hold period) |
+| Payout | Dr creator_payable / affiliate_payable; Cr clearing |
+| Failed or reversed transfer | Mirror of the payout journal; the earnings become available again |
+
+Every journal is checked for balance before insert and has a unique
+idempotency key (`sale:<order>`, `refund:<line>`, `payout:<id>`, ...).
+
+### Earnings sub-ledger and holds
+
+Each sale creates `earnings` rows for the creator (and affiliate) with status
+`pending` until `EARNINGS_HOLD_DAYS` (default 14) pass, then `available`. The
+daily job pays available balances of at least `MIN_PAYOUT_CENTS` to payees
+whose Stripe Express account has payouts enabled. A refund before payout
+marks the earning `reversed`. A refund after payout adds a *negative* earning
+that nets against the next payout, so a payee's available balance can be
+negative. Reconciliation verifies that every payable ledger account equals the
+unpaid earnings for that payee.
+
+### Reconciliation (`python -m app.cli run-finance`, or Admin → Finance)
+
+Checks: all journals balanced; payables match unpaid earnings; every
+non-pending order has a sale journal and correct totals; every fulfilled line
+has an active license and a royalty allocation; no payouts stuck in
+`processing` for over an hour; no unprocessed provider events. It also
+reports the clearing balance so finance can compare it with the Stripe
+balance. A non-`ok` run exits non-zero for cron alerting.
+
+### Known limitations
+
+* Refunds are whole-line only. A partial refund issued in the Stripe dashboard
+  is stored and flagged for manual review rather than guessed at.
+* Tax is allocated to lines in proportion to their prices (Stripe Tax returns
+  an order total).
+* Checkout sessions are single-currency; multi-currency pricing is Phase 5.
+* Provider-side reconciliation (matching Stripe balance transactions line by
+  line) is manual for now: compare the reported clearing balance with the
+  Stripe dashboard.
+* Affiliate commissions cover customer acquisition only. Creator-recruitment
+  bonuses are not built yet.

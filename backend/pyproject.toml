@@ -7,8 +7,7 @@ requires-python = ">=3.12"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -p no:cacheprovider"
-log_level = "WARNING"
-filterwarnings = ["ignore::DeprecationWarning"]
+filterwarnings = ["ignore::DeprecationWarning", "error::sqlalchemy.exc.SAWarning"]
 
 [tool.ruff]
 line-length = 130

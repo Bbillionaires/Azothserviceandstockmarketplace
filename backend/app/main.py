@@ -6,7 +6,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.v1 import admin, agreements, auth, creators, library, licenses, media, public_config, search, trust
+from app.api.v1 import (
+    admin,
+    admin_finance,
+    agreements,
+    auth,
+    creators,
+    earnings,
+    library,
+    licenses,
+    media,
+    orders,
+    public_config,
+    search,
+    trust,
+)
 from app.core.config import get_settings
 from app.services.storage import LocalStorage, get_storage
 
@@ -38,7 +52,8 @@ def create_app() -> FastAPI:
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
-    for module in (auth, creators, agreements, media, search, licenses, library, trust, admin, public_config):
+    for module in (auth, creators, agreements, media, search, licenses, library, trust, orders, earnings, admin,
+                   admin_finance, public_config):
         app.include_router(module.router, prefix=settings.api_prefix)
 
     @app.get("/health", tags=["ops"])

@@ -28,9 +28,15 @@ def build_engine(url: str):
 
         @event.listens_for(engine, "connect")
         def _enable_fk(dbapi_conn, _record):  # pragma: no cover - trivial
+            # Let SQLAlchemy manage transactions so SAVEPOINTs work with pysqlite.
+            dbapi_conn.isolation_level = None
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
             cur.close()
+
+        @event.listens_for(engine, "begin")
+        def _begin(conn):  # pragma: no cover - trivial
+            conn.exec_driver_sql("BEGIN")
 
     return engine
 

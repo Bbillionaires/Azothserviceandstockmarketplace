@@ -51,6 +51,28 @@ Exchange come after there is real demand data.
 * Agreement and legal texts are placeholders and must be replaced after legal
   review.
 
+## 2b. Phase 2 status (monetization)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Paid stock media sales | ✅ | Cart, server-side re-pricing, Stripe Checkout (fake provider for local dev), certificates and protected downloads |
+| Marketplace payment integration | ✅ | Stripe Checkout + Connect Express adapter, signed webhooks, idempotent event processing, retry of failed events |
+| Creator payout onboarding | ✅ | Hosted Express onboarding, account status sync |
+| Royalty calculations | ✅ | Engine output stored per line with rule version; double-entry ledger |
+| Licensing certificates | ✅ | Issued on payment; revoked on refund or chargeback, restored if the dispute is won |
+| Protected downloads | ✅ | Same signed-link system as free media; blocked after refund |
+| Earnings dashboards | ✅ | Pending, available, paid, lifetime; per-sale calculation; payouts; monthly CSV statement |
+| Basic affiliate referrals | ✅ | Referral links, attribution window, commission from the platform share, IP-velocity fraud flag, clawback on refund |
+| Refunds and chargebacks | ✅ | Admin line refunds; provider-side full refunds; disputes created and won |
+| Payouts and reconciliation | ✅ | Daily job with hold period, minimum payout, failure handling, advisory lock; reconciliation checks |
+| Finance admin console | ✅ | Overview KPIs, orders and refunds, payout run, reconciliation, failed-event retry |
+
+**Not yet verified against live Stripe.** The Stripe adapter is covered by
+offline tests (signature verification, request parameters, error handling),
+but nobody has run a real test-mode payment end to end yet. Do that in Stripe
+test mode before enabling `FEATURE_PAID_LICENSING` in production (see
+DEPLOYMENT.md §6).
+
 ## 3. Phased schedule
 
 Estimates assume one senior full-stack developer with AI assistance and part-time
@@ -60,7 +82,7 @@ design and QA. Calendar weeks, not effort.
 |---|---|---|---|
 | **1. Foundation** | Built in this delivery | (done) | — |
 | 1.5 Hardening | Worker queue, direct uploads, Redis rate limits, email provider, Sentry, backups, WCAG audit, staging environment, legal texts | 2–3 weeks | 3 weeks |
-| **2. Monetization** | Orders, Stripe Checkout and Connect Express, webhooks, ledger, royalty allocation, payouts, refunds, statements, earnings dashboard, reconciliation job, basic referrals | 5–7 weeks | ~10 weeks |
+| **2. Monetization** | Built (pending live Stripe test-mode verification) | (done) | — |
 | **3. Custom production** | Project briefs, Request This Shot, proposals, booking, messaging, milestones, deliverables, reviews, disputes, client galleries, creator matching (rules-based) | 8–10 weeks | ~20 weeks |
 | Addendum: immediate | Talent availability, Urgent Crew, vendor profiles, production bid requests | 4–6 weeks | ~26 weeks |
 | **4. Partnerships and advanced licensing** | University and club programs, collaborations, exclusive deals and e-signature, rights carve-outs, syndication | 6–8 weeks | ~34 weeks |

@@ -26,6 +26,7 @@ def public_config():
         "features": {
             "paid_licensing": s.feature_paid_licensing,
             "exclusive_licensing": s.feature_exclusive_licensing,
+            "payment_provider": s.payment_provider,
         },
         "media_categories": MEDIA_CATEGORIES,
         "professional_categories": PROFESSIONAL_CATEGORIES,

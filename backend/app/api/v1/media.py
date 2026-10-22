@@ -236,6 +236,12 @@ def set_pricing(asset_id: uuid.UUID, body: PricingIn, user: User = Depends(curre
         if not _active_agreement(db, creator, RevenueModel.free):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Accept the free distribution authorization first")
         wanted.append((lt, "original", 0, "USD", False))
+    if body.prices:
+        agreement = db.get(ContributorAgreement, asset.contributor_agreement_id) if asset.contributor_agreement_id else None
+        if not agreement or agreement.template.revenue_model is not RevenueModel.nonexclusive:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "This media was submitted for free distribution only. Upload it under the "
+                                "nonexclusive licensing agreement to sell paid licenses.")
     for p in body.prices:
         lt = types.get(p.license_code)
         if not lt or lt.is_free:

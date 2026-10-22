@@ -69,21 +69,26 @@ Schema changes go through Alembic (`backend/alembic/versions`). Conventions:
 
 Each phase ships as its own Alembic migration.
 
-### Phase 2: Monetization
+### Phase 2: Monetization (implemented, migration `0002`)
 
 | Table | Purpose |
 |---|---|
-| `orders` | Buyer checkout: status, totals, currency, tax, `stripe_payment_intent_id` UNIQUE, `idempotency_key` UNIQUE |
-| `order_lines` | One asset × license × size tier; price snapshot; FK to the resulting `rights_grants` row |
-| `financial_events` | Raw, immutable provider events (Stripe webhooks) keyed by provider event id UNIQUE, for idempotent processing |
-| `ledger_accounts` | Chart of accounts: platform revenue, `creator_payable:<id>`, `affiliate_payable:<id>`, processor clearing, tax payable, fees expense, refunds |
-| `ledger_entries` | Double-entry journal lines (`journal_id`, `account_id`, `debit_cents`, `credit_cents`). CHECK one side non-zero; deferred check that each journal balances; append-only |
-| `royalty_allocations` | Engine output per order line: rule id and version, deductions, net, pools and per-party amounts, explanation |
-| `payout_accounts` | Stripe Connect account per creator or affiliate: onboarding status, capabilities, country |
-| `payouts` | Transfers and payouts: amount, status, Stripe transfer id UNIQUE, ledger journal |
-| `refunds`, `chargebacks` | Reversal records linked to orders and reversal journals |
-| `tax_profiles` | W-9/W-8 status and 1099-K / DAC7 reporting flags (provider-hosted forms; no raw tax IDs stored by us) |
-| `affiliate_links`, `referrals`, `affiliate_commissions` | Unique codes, attributed signups and conversions, commission rows with fraud status |
+| `orders` | Buyer checkout: status (pending, paid, partially_refunded, refunded, disputed, canceled), subtotal, tax, total, provider fee; UNIQUE(`buyer_user_id`, `idempotency_key`); UNIQUE `provider_session_id`, `provider_payment_id`; attributed `affiliate_user_id` |
+| `order_lines` | Asset × license × size tier with price, tax and fee shares; the contributor agreement and **revenue-share rule version** used; the resulting `rights_grant_id` |
+| `financial_events` | Raw provider events, UNIQUE(`provider`, `provider_event_id`) so webhooks process once; `processing_error` for retries |
+| `ledger_accounts` | Chart of accounts per currency, UNIQUE(`code`, `currency`) |
+| `ledger_journals` | One posting per business event, UNIQUE `idempotency_key` |
+| `ledger_entries` | Journal lines; CHECK exactly one positive side; append-only |
+| `royalty_allocations` | Engine output per order line (rule version, deductions, pools, explanation), UNIQUE per line |
+| `earnings` | Payee sub-ledger with hold status (pending/available/paid/reversed); negative rows for clawbacks (`reverses_earning_id`) |
+| `payout_accounts` | Stripe Express account per user: status, payouts enabled, outstanding requirements |
+| `payouts` | Transfers to payees: UNIQUE `idempotency_key`, `provider_transfer_id`, journal, failure reason |
+| `refunds` | One per refunded line: amount, reason, provider refund id, journal |
+| `referral_codes`, `referrals` | One code per user; direct referrals with attribution window and fraud flags |
+| `reconciliation_runs` | Results of each reconciliation (checks and findings) |
+
+Still planned for monetization: `tax_profiles` (W-9/W-8 status via Stripe)
+and creator-recruitment bonus tables.
 
 ### Phase 3: Custom production
 

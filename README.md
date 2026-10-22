@@ -35,10 +35,23 @@ is a configurable placeholder.
   from the platform share, collaborator splits) and rights-availability checks
   that block conflicting exclusive grants.
 
-Paid checkout, payouts and the ledger are Phase 2. See
-[docs/ROADMAP.md](docs/ROADMAP.md) for the plan and known limitations. Nothing
-here is production-ready until the legal texts are reviewed and the hardening
-items in the roadmap are complete.
+**Phase 2 (monetization):**
+
+* Cart and checkout through Stripe Checkout. A fake provider lets you test the
+  whole flow locally without Stripe.
+* Server-side re-pricing, signed and idempotent webhooks, and licenses issued
+  on payment.
+* An append-only double-entry ledger. Royalties are calculated for every order
+  line using the creator's signed rule version.
+* Creator and affiliate earnings with a 14-day hold, Stripe Express payout
+  onboarding, automatic payouts and monthly CSV statements.
+* Refunds, chargebacks (including won disputes) and clawbacks.
+* Referral links with commission paid from the platform share.
+* Finance console with reconciliation.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for status and known limitations.
+Nothing here is production-ready until the legal texts are reviewed, Stripe is
+verified in test mode, and the hardening items in the roadmap are complete.
 
 ## Quick start on Windows (PowerShell)
 
@@ -72,6 +85,7 @@ alembic upgrade head                       # create tables
 python -m app.cli seed                     # roles, license types, draft agreements
 python -m app.cli create-admin you@example.com "Your Name"
 python -m app.cli demo                     # optional: 3 demo creators + 12 images
+# To try paid checkout locally, set FEATURE_PAID_LICENSING=true in .env (fake provider, no money moves)
 uvicorn app.main:app --reload --port 8000  # API docs: http://localhost:8000/docs
 ```
 
@@ -94,7 +108,7 @@ npm run dev                                # http://localhost:3000
 ```powershell
 cd backend
 .\.venv\Scripts\Activate.ps1
-pytest                 # 47 tests: royalties, rights, auth, media flow, admin, video, migrations
+pytest                 # royalties, rights, auth, media flow, admin, video, migrations, commerce
 ruff check .
 
 cd ..\frontend
@@ -107,8 +121,8 @@ macOS and Linux use the same commands with `source .venv/bin/activate` and
 
 ## Deploying
 
-Vercel (frontend) + Railway (API, PostgreSQL, ClamAV) + Cloudflare R2
-(storage). Step by step in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Vercel (frontend) + Railway (API, PostgreSQL, ClamAV, daily finance cron) +
+Cloudflare R2 (storage) + Stripe Connect (payments). Step by step in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Development rules
 

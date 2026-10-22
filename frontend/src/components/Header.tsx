@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { brand } from "@/config/brand";
+import { useCart } from "@/lib/cart";
 import { hasRole, useSession } from "@/lib/session";
 
 const NAV = [
@@ -32,6 +33,7 @@ export function Logo() {
 
 export function Header() {
   const { user, logout } = useSession();
+  const { items } = useCart();
   const [open, setOpen] = useState(false);
   const router = useRouter();
 
@@ -52,9 +54,12 @@ export function Header() {
           </ul>
         </nav>
         <div className="hidden items-center gap-3 lg:flex">
+          {items.length > 0 && (
+            <Link href="/cart" className="text-sm text-gold-300 hover:text-gold-400">Cart ({items.length})</Link>
+          )}
           {user ? (
             <>
-              {hasRole(user, "moderator") && <Link href="/admin" className="text-sm text-ink-200 hover:text-gold-300">Admin</Link>}
+              {hasRole(user, "moderator", "finance_admin") && <Link href="/admin" className="text-sm text-ink-200 hover:text-gold-300">Admin</Link>}
               <Link href="/dashboard" className="text-sm text-ink-200 hover:text-gold-300">Dashboard</Link>
               <button
                 className="btn-ghost text-sm"
@@ -85,10 +90,11 @@ export function Header() {
             {NAV.map((n) => (
               <li key={n.href}><Link href={n.href} onClick={() => setOpen(false)}>{n.label}</Link></li>
             ))}
+            {items.length > 0 && <li><Link href="/cart" onClick={() => setOpen(false)}>Cart ({items.length})</Link></li>}
             {user ? (
               <>
                 <li><Link href="/dashboard" onClick={() => setOpen(false)}>Dashboard</Link></li>
-                {hasRole(user, "moderator") && <li><Link href="/admin" onClick={() => setOpen(false)}>Admin</Link></li>}
+                {hasRole(user, "moderator", "finance_admin") && <li><Link href="/admin" onClick={() => setOpen(false)}>Admin</Link></li>}
                 <li><button onClick={async () => { await logout(); setOpen(false); router.push("/"); }}>Sign out</button></li>
               </>
             ) : (

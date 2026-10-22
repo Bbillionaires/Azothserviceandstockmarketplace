@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { Alert } from "@/components/Alert";
 import { api, label, money } from "@/lib/api";
+import { useCart } from "@/lib/cart";
+import { usePublicConfig } from "@/lib/config";
 import { useSession } from "@/lib/session";
 import type { MediaDetail } from "@/lib/types";
 
@@ -15,6 +17,11 @@ export function MediaActions({ media }: { media: MediaDetail }) {
   const [error, setError] = useState("");
   const [download, setDownload] = useState<Download | null>(null);
   const [saved, setSaved] = useState(false);
+  const config = usePublicConfig();
+  const { items, add } = useCart();
+  const inCart = items.find((i) => i.asset_id === media.id);
+  const paidOpen = !!config?.features.paid_licensing;
+  const isOwner = user?.creator_handle === media.creator.handle;
 
   const getFree = async (code: string) => {
     setBusy(true);
@@ -63,15 +70,34 @@ export function MediaActions({ media }: { media: MediaDetail }) {
           <h2 className="font-display text-xl">License options</h2>
           <ul className="mt-4 divide-y divide-ink-700 text-sm">
             {media.prices.map((p) => (
-              <li key={p.id} className="flex items-center justify-between py-3">
+              <li key={p.id} className="flex items-center justify-between gap-3 py-3">
                 <span>{p.license_name}<span className="block text-xs text-ink-400">{label(p.size_tier)}</span></span>
-                <span className="font-semibold text-gold-300">{money(p.price_cents, p.currency)}</span>
+                <span className="flex items-center gap-3">
+                  <span className="font-semibold text-gold-300">{money(p.price_cents, p.currency)}</span>
+                  {paidOpen && !isOwner && (
+                    <button
+                      className={inCart?.price_listing_id === p.id ? "btn-ghost px-3 py-1 text-xs" : "btn-gold px-3 py-1 text-xs"}
+                      disabled={inCart?.price_listing_id === p.id}
+                      onClick={() => add({
+                        price_listing_id: p.id, asset_id: media.id, title: media.title,
+                        thumbnail_url: media.thumbnail_url, license_name: p.license_name, size_tier: p.size_tier,
+                        price_cents: p.price_cents, currency: p.currency,
+                      })}
+                    >
+                      {inCart?.price_listing_id === p.id ? "In cart" : inCart ? "Switch" : "Add"}
+                    </button>
+                  )}
+                </span>
               </li>
             ))}
           </ul>
-          <button disabled className="btn-gold mt-4 w-full" aria-describedby="checkout-note">License &amp; download</button>
-          <p id="checkout-note" className="mt-2 text-xs text-ink-400">
-            Paid checkout opens in the next release. Prices are set by the creator.
+          {paidOpen ? (
+            inCart && <Link href="/cart" className="btn-gold mt-4 w-full">Go to cart &amp; checkout</Link>
+          ) : (
+            <p className="mt-2 text-xs text-ink-400">Paid checkout is not open yet. Prices are set by the creator.</p>
+          )}
+          <p className="mt-3 text-xs text-ink-400">
+            Every purchase includes a license certificate and protected download of the full-quality original.
           </p>
         </div>
       )}

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert } from "@/components/Alert";
 import { api, label } from "@/lib/api";
 import { hasRole, useSession } from "@/lib/session";
+import { FinancePanel } from "./FinancePanel";
 
 type QueueItem = {
   id: string; title: string; media_type: string; category: string; status: string; thumbnail_url: string | null;
@@ -13,12 +14,12 @@ type QueueItem = {
 };
 type Complaint = { id: string; asset_id: string; complainant_name: string; work: string; status: string; counter_notice: unknown; created_at: string };
 type Appeal = { id: string; asset_id: string; action: string; reason: string; statement: string };
-type Tab = "queue" | "complaints" | "appeals" | "stats";
+type Tab = "queue" | "complaints" | "appeals" | "stats" | "finance";
 
 export default function AdminPage() {
   const { user, loading } = useSession();
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>("queue");
+  const [tab, setTab] = useState<Tab | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [appeals, setAppeals] = useState<Appeal[]>([]);
@@ -38,28 +39,34 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (loading) return;
-    if (!hasRole(user, "moderator")) { router.push("/"); return; }
-    load().catch((e) => setMsg({ ok: false, text: e.message }));
+    if (!hasRole(user, "moderator", "finance_admin")) { router.push("/"); return; }
+    if (hasRole(user, "moderator")) load().catch((e) => setMsg({ ok: false, text: e.message }));
   }, [user, loading, router, load]);
 
   const act = async (fn: () => Promise<{ detail: string }>) => {
     try { setMsg({ ok: true, text: (await fn()).detail }); await load(); } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
   };
 
-  if (loading || !hasRole(user, "moderator")) return <p className="p-10 text-center text-ink-300">Loading…</p>;
+  if (loading || !hasRole(user, "moderator", "finance_admin")) return <p className="p-10 text-center text-ink-300">Loading…</p>;
+  const tabs: [Tab, string][] = [
+    ...(hasRole(user, "moderator") ? [["queue", `Review queue (${queue.length})`], ["complaints", `Copyright (${complaints.length})`],
+      ["appeals", `Appeals (${appeals.length})`], ["stats", "Overview"]] as [Tab, string][] : []),
+    ...(hasRole(user, "finance_admin") ? [["finance", "Finance"]] as [Tab, string][] : []),
+  ];
+  const current = tab ?? tabs[0][0];
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-10">
       <h1 className="font-display text-4xl">Control center</h1>
       <p className="text-sm text-ink-300">Automated signals are advisory. Decide on the evidence; never remove lawful content on an unverified allegation.</p>
       <div role="tablist" className="mt-8 flex gap-2 border-b border-ink-800">
-        {([["queue", `Review queue (${queue.length})`], ["complaints", `Copyright (${complaints.length})`], ["appeals", `Appeals (${appeals.length})`], ["stats", "Overview"]] as [Tab, string][]).map(([t, l]) => (
-          <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`-mb-px border-b-2 px-4 py-2 text-sm ${tab === t ? "border-gold-500 text-gold-300" : "border-transparent text-ink-300"}`}>{l}</button>
+        {tabs.map(([t, l]) => (
+          <button key={t} role="tab" aria-selected={current === t} onClick={() => setTab(t)} className={`-mb-px border-b-2 px-4 py-2 text-sm ${current === t ? "border-gold-500 text-gold-300" : "border-transparent text-ink-300"}`}>{l}</button>
         ))}
       </div>
       {msg && <div className="mt-4"><Alert kind={msg.ok ? "success" : "error"}>{msg.text}</Alert></div>}
 
-      {tab === "queue" && (
+      {current === "queue" && (
         <div className="mt-6 space-y-4">
           {queue.length === 0 && <p className="text-ink-300">Queue is empty.</p>}
           {queue.map((q) => (
@@ -95,7 +102,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "complaints" && (
+      {current === "complaints" && (
         <div className="mt-6 space-y-4">
           {complaints.length === 0 && <p className="text-ink-300">No complaints.</p>}
           {complaints.map((c) => (
@@ -114,7 +121,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "appeals" && (
+      {current === "appeals" && (
         <div className="mt-6 space-y-4">
           {appeals.length === 0 && <p className="text-ink-300">No open appeals.</p>}
           {appeals.map((a) => (
@@ -131,7 +138,9 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "stats" && stats && (
+      {current === "finance" && <FinancePanel />}
+
+      {current === "stats" && stats && (
         <pre className="card mt-6 overflow-x-auto p-5 text-sm text-ink-200">{JSON.stringify(stats, null, 2)}</pre>
       )}
     </div>

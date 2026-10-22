@@ -70,6 +70,19 @@ class Settings(BaseSettings):
     email_backend: str = "console"  # console | smtp (provider adapters added in later phases)
     public_web_url: str = "http://localhost:3000"
 
+    # --- Payments (Phase 2) ----------------------------------------------------
+    # "fake" simulates the provider for local development and tests; it is
+    # refused in production. "stripe" uses Stripe Checkout + Connect Express.
+    payment_provider: str = "fake"
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    stripe_tax_enabled: bool = False
+    # Earnings stay pending this long so refunds and chargebacks can be absorbed
+    # before money leaves the platform balance.
+    earnings_hold_days: int = 14
+    min_payout_cents: int = 1000
+    referral_attribution_days: int = 365
+
     # --- Feature flags -----------------------------------------------------
     # Exclusive licensing and payments stay off until agreements are reviewed
     # by counsel and payment testing is complete.
@@ -85,6 +98,10 @@ class Settings(BaseSettings):
                 raise ValueError("COOKIE_SECURE must be true in production")
             if self.storage_backend != "s3":
                 raise ValueError("Production requires STORAGE_BACKEND=s3 (container disks are ephemeral)")
+            if self.feature_paid_licensing and (
+                self.payment_provider != "stripe" or not self.stripe_secret_key or not self.stripe_webhook_secret
+            ):
+                raise ValueError("Paid licensing in production requires PAYMENT_PROVIDER=stripe and Stripe keys")
         return self
 
     @property

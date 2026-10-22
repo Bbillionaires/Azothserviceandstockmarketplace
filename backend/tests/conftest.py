@@ -7,10 +7,14 @@ from pathlib import Path
 _tmp = Path(tempfile.mkdtemp(prefix="mkt-test-"))
 os.environ.update(
     ENVIRONMENT="test",
-    DATABASE_URL=f"sqlite:///{_tmp / 'test.db'}",
+    DATABASE_URL=os.environ.get("TEST_DATABASE_URL", f"sqlite:///{_tmp / 'test.db'}"),
     LOCAL_STORAGE_PATH=str(_tmp / "storage"),
     SECRET_KEY="test-secret-key-0123456789abcdef0123456789",
     LOGIN_RATE_LIMIT_PER_MINUTE="1000",
+    FEATURE_PAID_LICENSING="true",
+    PAYMENT_PROVIDER="fake",
+    EARNINGS_HOLD_DAYS="14",
+    MIN_PAYOUT_CENTS="1000",
 )
 
 import pytest  # noqa: E402
@@ -23,17 +27,37 @@ from app.core.rate_limit import limiter  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base, Role, User, UserRole  # noqa: E402
 from app.services import email  # noqa: E402
+from app.services.payments import get_provider  # noqa: E402
 from app.services.reference_data import seed_reference_data  # noqa: E402
+
+
+def _reset_schema() -> None:
+    if engine.dialect.name != "sqlite":
+        Base.metadata.drop_all(engine)
+    else:
+        # Drop with FK checks off: self-referencing rows (e.g. earnings clawbacks)
+        # would otherwise block SQLite's implicit DELETE during DROP TABLE.
+        raw = engine.raw_connection()
+        try:
+            cur = raw.cursor()
+            cur.execute("PRAGMA foreign_keys=OFF")
+            for table in reversed(Base.metadata.sorted_tables):
+                cur.execute(f'DROP TABLE IF EXISTS "{table.name}"')
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.close()
+        finally:
+            raw.close()
+    Base.metadata.create_all(engine)
 
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    _reset_schema()
     with SessionLocal() as db:
         seed_reference_data(db)
     limiter.reset()
     email.outbox().clear()
+    get_provider.cache_clear()
     yield
 
 

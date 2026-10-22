@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Fraunces, Inter } from "next/font/google";
 import { Footer } from "@/components/Footer";
 import { Header } from "@/components/Header";
+import { RefCapture } from "@/components/RefCapture";
 import { brand } from "@/config/brand";
 import { SessionProvider } from "@/lib/session";
 import "./globals.css";
@@ -21,6 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${inter.variable} ${fraunces.variable}`}>
       <body style={{ fontFamily: "var(--font-inter), var(--font-sans)" }}>
         <SessionProvider>
+          <RefCapture />
           <Header />
           <main id="main">{children}</main>
           <Footer />

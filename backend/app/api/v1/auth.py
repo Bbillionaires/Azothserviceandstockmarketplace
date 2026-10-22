@@ -113,6 +113,9 @@ def register(body: RegisterIn, request: Request, response: Response, db: Session
     db.add(user)
     db.flush()
     grant_role(db, user, RoleCode.buyer)
+    from app.services.referral_service import attribute_signup
+
+    attribute_signup(db, user, body.referral_code, client_ip(request))
     send_verification(db, user)
     audit.record(db, "user.registered", user.id, "user", user.id, client_ip(request), wants_to_sell=body.wants_to_sell)
     db.commit()

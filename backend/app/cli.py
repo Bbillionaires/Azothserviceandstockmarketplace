@@ -3,6 +3,7 @@
     python -m app.cli seed                         # reference data (idempotent)
     python -m app.cli create-admin EMAIL NAME      # prompts for a password
     python -m app.cli demo                         # demo creators + media (dev only)
+    python -m app.cli run-finance                  # daily: release earnings, payouts, reconciliation
 """
 
 import argparse
@@ -146,7 +147,9 @@ def cmd_demo(_args) -> None:
             return
         for i, (title, category, keywords, top, bottom) in enumerate(DEMO_MEDIA):
             creator = creators[i % len(creators)]
-            agreement = db.scalar(select(ContributorAgreement).where(ContributorAgreement.creator_id == creator.id))
+            agreement = db.scalar(select(ContributorAgreement).where(
+                ContributorAgreement.creator_id == creator.id,
+                ContributorAgreement.template_id == templates["model_a_nonexclusive"].id))
             size = [(3840, 2160), (2400, 3600), (4000, 4000), (6000, 4000)][i % 4]
             asset = MediaAsset(creator_id=creator.id, uploaded_by=creator.user_id,
                                contributor_agreement_id=agreement.id, media_type=MediaType.photo,
@@ -177,6 +180,24 @@ def cmd_demo(_args) -> None:
     print("Demo data loaded. Demo creator password: demo-password-123")
 
 
+def cmd_run_finance(_args) -> None:
+    from app.services import payout_service
+    from app.services.payments import get_provider
+
+    with SessionLocal() as db:
+        canceled = payout_service.cancel_stale_orders(db)
+        db.commit()
+        result = payout_service.run_payouts(db, get_provider())
+        db.commit()
+        run = payout_service.reconcile(db)
+        db.commit()
+    print(f"Canceled stale orders: {canceled}")
+    print(f"Payouts: {result}")
+    print(f"Reconciliation: {run.status} ({len(run.findings)} findings)")
+    if run.status != "ok":
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(required=True)
@@ -186,6 +207,7 @@ def main() -> None:
     p.add_argument("name")
     p.set_defaults(func=cmd_create_admin)
     sub.add_parser("demo").set_defaults(func=cmd_demo)
+    sub.add_parser("run-finance").set_defaults(func=cmd_run_finance)
     args = parser.parse_args()
     args.func(args)
 
