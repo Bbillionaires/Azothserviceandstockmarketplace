@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Alert } from "@/components/Alert";
-import { label } from "@/lib/api";
+import { api, label } from "@/lib/api";
+import { uploadFile } from "@/lib/upload";
 
 const CATEGORIES = [
   "aerial_drone", "architecture", "b_roll", "business_finance", "commercial", "documentary", "editorial",
@@ -24,39 +25,34 @@ export default function UploadPage() {
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
 
-  const submit = (e: React.FormEvent<HTMLFormElement>) => {
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!file) return;
     const data = new FormData(e.currentTarget);
-    data.set("file", file);
-    // Optional fields left blank are omitted rather than sent as "".
-    for (const [k, v] of [...data.entries()]) if (v === "") data.delete(k);
-    for (const k of ["is_original_author", "is_editorial_only", "is_ai_generated", "is_materially_altered", "has_model_release", "has_property_release", "accept_declaration"]) {
-      data.set(k, data.get(k) ? "true" : "false");
-    }
+    const text = (k: string) => String(data.get(k) ?? "").trim();
+    const flag = (k: string) => data.get(k) !== null;
     setError("");
     setProgress(0);
-    // XHR (not fetch) so large video uploads can report progress.
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/v1/media");
-    xhr.withCredentials = true;
-    xhr.setRequestHeader("X-Requested-With", "fetch");
-    xhr.upload.onprogress = (ev) => ev.lengthComputable && setProgress(Math.round((ev.loaded / ev.total) * 100));
-    xhr.onload = () => {
-      if (xhr.status === 202) {
-        router.push(`/dashboard/media/${JSON.parse(xhr.responseText).id}?uploaded=1`);
-      } else {
-        let msg = `Upload failed (${xhr.status})`;
-        try {
-          const body = JSON.parse(xhr.responseText);
-          msg = typeof body.detail === "string" ? body.detail : body.detail?.[0]?.msg ?? msg;
-        } catch {}
-        setError(msg);
-        setProgress(null);
-      }
-    };
-    xhr.onerror = () => { setError("Network error during upload"); setProgress(null); };
-    xhr.send(data);
+    try {
+      // The file goes straight to storage; the API never buffers large video.
+      const uploadId = await uploadFile(file, "media", undefined, setProgress);
+      setProgress(100);
+      const asset = await api<{ id: string }>("/media/from-upload", { method: "POST", json: {
+        upload_id: uploadId, title: text("title"), description: text("description"), category: text("category"),
+        keywords: text("keywords").split(",").map((k) => k.trim()).filter(Boolean),
+        location_city: text("location_city") || null, location_country: text("location_country") || null,
+        distribution: text("distribution") || "nonexclusive", rights_owner_name: text("rights_owner_name"),
+        existing_licenses_disclosure: text("existing_licenses_disclosure"),
+        is_original_author: flag("is_original_author"), is_editorial_only: flag("is_editorial_only"),
+        is_ai_generated: flag("is_ai_generated"), is_materially_altered: flag("is_materially_altered"),
+        has_model_release: flag("has_model_release"), has_property_release: flag("has_property_release"),
+        accept_declaration: flag("accept_declaration"),
+      } });
+      router.push(`/dashboard/media/${asset.id}?uploaded=1`);
+    } catch (err) {
+      setError((err as Error).message);
+      setProgress(null);
+    }
   };
 
   return (

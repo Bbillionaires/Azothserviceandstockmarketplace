@@ -113,8 +113,29 @@ Columns added to Phase 2 tables: `orders.purpose` (license/milestone) and
 nullable); `refunds.milestone_id` (and `order_line_id` now nullable). New enum
 values: `service` revenue model, `service_milestone` earnings,
 `service_funding`/`service_release`/`service_refund` journals,
-`project_canceled`/`dispute_resolution` refund reasons. Still planned:
-gallery print orders and add-on license purchases from galleries.
+`project_canceled`/`dispute_resolution` refund reasons.
+
+### Gap closure (implemented, migration `0004`)
+
+| Table | Purpose |
+|---|---|
+| `upload_sessions` | Direct-to-storage uploads: owner, purpose (media / deliverable / gallery_item), target, declared and maximum size, staged `incoming/` key, status, expiry |
+| `gallery_print_options` | Print products a creator offers in a gallery (name, price); deactivated rather than deleted |
+| `gallery_orders` | Guest gallery orders: link to `orders`, client name and email, shipping address, status, commission rule snapshot, outstanding allocation by account, chargeback snapshot, carrier and tracking |
+| `gallery_order_items` | Digital downloads and prints per order (quantity, unit price) |
+
+New columns: `orders.buyer_email` (and `buyer_user_id` now nullable for guest
+gallery orders); `order_lines.refunded_cents`; `refunds.allocation` (accounts
+reversed) and several refunds per line (unique constraint dropped);
+`earnings.order_id` (gallery sales); `referrals.creator_bonus_paid_at`;
+`milestones.affiliate_user_id`, released amounts outstanding per party
+(`release_creator_cents`, `release_affiliate_cents`, `release_platform_cents`),
+`reversed_release_cents`, `tax_refunded_cents`, `chargeback_snapshot`;
+`deliverables.scan_status` (and `checksum_sha256` nullable until scanned);
+`client_galleries.download_price_cents` and `currency`;
+`gallery_items.download_unlocked`. New enum values: `gallery` order purpose,
+`gallery_sale` and `referral_bonus` earnings and journals,
+`price_adjustment` refund reason.
 
 ### Phase 4: Partnerships and advanced licensing
 

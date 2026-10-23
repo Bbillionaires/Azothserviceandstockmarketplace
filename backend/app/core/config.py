@@ -66,8 +66,20 @@ class Settings(BaseSettings):
     ffprobe_binary: str = "ffprobe"
     malware_scanner: str = "none"  # none | clamav
 
+    # --- Background jobs and shared state --------------------------------
+    # With REDIS_URL set, media processing runs on RQ workers (`rq worker`) and
+    # rate limits are shared across API replicas. Without it, jobs run
+    # in-process after the response and limits are per process (dev only).
+    redis_url: str | None = None
+    upload_session_minutes: int = 120
+
     # --- Email -------------------------------------------------------------
-    email_backend: str = "console"  # console | smtp (provider adapters added in later phases)
+    email_backend: str = "console"  # console | smtp | resend
+    email_from: str = "no-reply@example.com"
+    resend_api_key: str | None = None
+
+    # --- Bot protection (Cloudflare Turnstile); disabled when unset --------
+    turnstile_secret_key: str | None = None
     public_web_url: str = "http://localhost:3000"
 
     # --- Payments (Phase 2) ----------------------------------------------------
@@ -82,6 +94,10 @@ class Settings(BaseSettings):
     earnings_hold_days: int = 14
     min_payout_cents: int = 1000
     referral_attribution_days: int = 365
+    # One-time bonus to a referrer when a creator they referred earns for the
+    # first time (after that earning clears its hold). 0 disables. The amount
+    # is a placeholder business decision.
+    referral_creator_bonus_cents: int = 2500
     # Custom production: a submitted milestone is approved automatically if the
     # client neither approves nor requests a revision within this many days.
     milestone_auto_approve_days: int = 7
@@ -102,6 +118,8 @@ class Settings(BaseSettings):
                 raise ValueError("COOKIE_SECURE must be true in production")
             if self.storage_backend != "s3":
                 raise ValueError("Production requires STORAGE_BACKEND=s3 (container disks are ephemeral)")
+            if not self.redis_url:
+                raise ValueError("Production requires REDIS_URL (job queue and shared rate limits)")
             if self.feature_paid_licensing and (
                 self.payment_provider != "stripe" or not self.stripe_secret_key or not self.stripe_webhook_secret
             ):

@@ -33,6 +33,8 @@ class PaymentDetails:
     amount_total_cents: int
     amount_tax_cents: int
     fee_cents: int  # processing fee charged by the provider
+    line_tax_cents: list[int] | None = None  # per checkout line, in order, when the provider reports it
+    charge_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,20 @@ class AccountState:
     payouts_enabled: bool
     country: str | None
     requirements_due: list[str]
+
+
+@dataclass(frozen=True)
+class BalanceActivity:
+    """One movement in the provider balance, normalized for reconciliation."""
+
+    id: str
+    type: str  # charge | refund | transfer | other
+    amount_cents: int  # positive for charges, positive magnitude for refunds/transfers
+    fee_cents: int
+    currency: str
+    payment_id: str | None = None  # charges and refunds
+    transfer_id: str | None = None  # transfers
+    created: int = 0  # unix seconds
 
 
 class PaymentProvider(Protocol):
@@ -71,3 +87,5 @@ class PaymentProvider(Protocol):
                  description: str, metadata: dict) -> str: ...
 
     def refund(self, *, payment_id: str, amount_cents: int, idempotency_key: str, metadata: dict) -> str: ...
+
+    def balance_activity(self, since: int, until: int) -> list[BalanceActivity]: ...

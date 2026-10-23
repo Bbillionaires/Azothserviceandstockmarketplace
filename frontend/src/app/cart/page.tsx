@@ -14,29 +14,33 @@ function Cart() {
   const { user } = useSession();
   const router = useRouter();
   const canceled = useSearchParams().get("canceled");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const currency = items[0]?.currency ?? "USD";
-  const subtotal = items.reduce((a, i) => a + i.price_cents, 0);
+  // One order per currency: card networks settle a payment in a single currency.
+  const groups = Object.entries(items.reduce<Record<string, typeof items>>((acc, i) => {
+    (acc[i.currency] ??= []).push(i);
+    return acc;
+  }, {}));
 
-  const checkout = async () => {
-    setBusy(true);
+  const checkout = async (currency: string, group: typeof items) => {
+    setBusy(currency);
     setError("");
+    const storeKey = `checkout.key.${currency}`;
     try {
       // One idempotency key per checkout attempt: a double click cannot create two orders.
-      const key = sessionStorage.getItem("checkout.key") ?? crypto.randomUUID();
-      sessionStorage.setItem("checkout.key", key);
+      const key = sessionStorage.getItem(storeKey) ?? crypto.randomUUID();
+      sessionStorage.setItem(storeKey, key);
       const order = await api<Order>("/orders", {
         method: "POST",
-        json: { idempotency_key: key, items: items.map((i) => ({ price_listing_id: i.price_listing_id, licensee_name: i.licensee_name || undefined })) },
+        json: { idempotency_key: key, items: group.map((i) => ({ price_listing_id: i.price_listing_id, licensee_name: i.licensee_name || undefined })) },
       });
-      sessionStorage.removeItem("checkout.key");
+      sessionStorage.removeItem(storeKey);
       if (order.checkout_url) window.location.href = order.checkout_url;
       else router.push(`/checkout/success?order=${order.id}`);
     } catch (e) {
-      sessionStorage.removeItem("checkout.key");
+      sessionStorage.removeItem(storeKey);
       setError((e as Error).message);
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -74,13 +78,24 @@ function Cart() {
             ))}
           </ul>
           <aside className="card h-fit space-y-4 p-6">
-            <div className="flex justify-between"><span className="text-ink-300">Subtotal</span><span>{money(subtotal, currency)}</span></div>
+            {groups.map(([currency, group]) => (
+              <div key={currency} className="space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-ink-300">Subtotal{groups.length > 1 ? ` (${currency}, ${group.length} item${group.length > 1 ? "s" : ""})` : ""}</span>
+                  <span>{money(group.reduce((a, i) => a + i.price_cents, 0), currency)}</span>
+                </div>
+                {user?.email_verified && (
+                  <button className="btn-gold w-full" disabled={busy !== null} onClick={() => checkout(currency, group)}>
+                    {busy === currency ? "Starting checkout…" : groups.length > 1 ? `Check out ${currency} items` : "Checkout"}
+                  </button>
+                )}
+              </div>
+            ))}
+            {groups.length > 1 && <p className="text-xs text-ink-400">Your cart has prices in more than one currency, so each currency is paid separately.</p>}
             <p className="text-xs text-ink-400">Sales tax, if any, is calculated at checkout. Prices are confirmed by the server when you check out.</p>
             {error && <Alert>{error}</Alert>}
             {user ? (
-              user.email_verified
-                ? <button className="btn-gold w-full" disabled={busy} onClick={checkout}>{busy ? "Starting checkout…" : "Checkout"}</button>
-                : <Alert kind="info">Verify your email address before purchasing.</Alert>
+              !user.email_verified && <Alert kind="info">Verify your email address before purchasing.</Alert>
             ) : (
               <Link href="/login?next=/cart" className="btn-gold w-full">Sign in to check out</Link>
             )}

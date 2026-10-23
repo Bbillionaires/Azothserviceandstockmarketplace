@@ -10,7 +10,7 @@ import type { Order } from "@/lib/orders";
 
 function Success() {
   const id = useSearchParams().get("order") ?? "";
-  const { clear } = useCart();
+  const { removeListings } = useCart();
   const [order, setOrder] = useState<Order | null>(null);
   const [error, setError] = useState("");
   const [tries, setTries] = useState(0);
@@ -21,11 +21,11 @@ function Success() {
     api<Order>(`/orders/${id}`).then((o) => {
       if (stop) return;
       setOrder(o);
-      if (o.status === "paid") clear();
+      if (o.status === "paid") removeListings(o.lines.map((l) => l.price_listing_id ?? ""));
       else if (o.status === "pending" && tries < 20) setTimeout(() => setTries((t) => t + 1), 1500);
     }).catch((e) => setError(e.message));
     return () => { stop = true; };
-  }, [id, tries, clear]);
+  }, [id, tries, removeListings]);
 
   const download = async (cert: string) => {
     const d = await api<{ download_url: string }>(`/licenses/${cert}/download`, { method: "POST" });

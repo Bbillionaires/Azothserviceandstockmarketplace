@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.deps import current_user, verified_user
+from app.core.deps import current_user, optional_user, verified_user
 from app.core.rate_limit import limiter
 from app.models import FileKind, LicenseType, MediaAsset, Milestone, Order, OrderStatus, RightsGrant, User
 from app.schemas.commerce import OrderIn, OrderOut
@@ -31,6 +31,7 @@ def order_out(db: Session, order: Order) -> dict:
             "license_name": db.get(LicenseType, ln.license_type_id).name, "size_tier": ln.size_tier,
             "licensee_name": ln.licensee_name, "unit_price_cents": ln.unit_price_cents, "tax_cents": ln.tax_cents,
             "status": ln.status.value, "certificate_number": grant.certificate_number if grant else None,
+            "refunded_cents": ln.refunded_cents, "price_listing_id": ln.price_listing_id,
         })
     return {"id": order.id, "status": order.status.value, "currency": order.currency,
             "subtotal_cents": order.subtotal_cents, "tax_cents": order.tax_cents, "total_cents": order.total_cents,
@@ -85,13 +86,14 @@ async def webhook(provider_name: str, request: Request, db: Session = Depends(ge
 
 @router.post("/payments/dev/complete/{order_id}", include_in_schema=False)
 def dev_complete(order_id: uuid.UUID, request: Request, outcome: str = Query("paid", pattern="^(paid|expired)$"),
-                 user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Development only: simulate the provider completing a checkout."""
+                 user: User | None = Depends(optional_user), db: Session = Depends(get_db)):
+    """Development only: simulate the provider completing a checkout. Gallery
+    orders are placed without an account, so they need no session."""
     provider = get_provider()
     if provider.name != "fake" or get_settings().is_production:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     order = db.get(Order, order_id)
-    if not order or order.buyer_user_id != user.id:
+    if not order or (order.buyer_user_id is not None and (user is None or order.buyer_user_id != user.id)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     provider.remember_session(order.provider_session_id, str(order.id), order.currency, order.subtotal_cents)
     event_type = "checkout.session.completed" if outcome == "paid" else "checkout.session.expired"

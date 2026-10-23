@@ -192,7 +192,7 @@ def cmd_run_finance(_args) -> None:
         db.commit()
         result = payout_service.run_payouts(db, get_provider())
         db.commit()
-        run = payout_service.reconcile(db)
+        run = payout_service.reconcile(db, provider=get_provider())
         db.commit()
     print(f"Canceled stale orders: {canceled}")
     print(f"Milestones auto-approved: {approved}")

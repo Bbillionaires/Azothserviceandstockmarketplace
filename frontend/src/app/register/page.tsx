@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { Alert } from "@/components/Alert";
 import { AuthShell } from "@/components/AuthShell";
+import { Turnstile, captchaEnabled } from "@/components/Turnstile";
 import { api } from "@/lib/api";
 import { storedReferral } from "@/lib/cart";
 import { useSession } from "@/lib/session";
@@ -16,17 +17,20 @@ function RegisterForm() {
   const [form, setForm] = useState({ email: "", password: "", display_name: "", wants_to_sell: params.get("sell") === "1", accept_terms: false });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [captcha, setCaptcha] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await api("/auth/register", { method: "POST", json: { ...form, referral_code: params.get("ref") || storedReferral() || undefined } });
+      await api("/auth/register", { method: "POST", json: { ...form, referral_code: params.get("ref") || storedReferral() || undefined, captcha_token: captcha } });
       await refresh();
       router.push("/dashboard?welcome=1");
     } catch (err) {
       setError((err as Error).message);
+      setCaptchaReset((n) => n + 1);
     } finally {
       setBusy(false);
     }
@@ -56,7 +60,8 @@ function RegisterForm() {
         <input type="checkbox" className="mt-1" checked={form.accept_terms} onChange={(e) => setForm({ ...form, accept_terms: e.target.checked })} required />
         <span>I agree to the <Link className="underline" href="/legal/terms">Terms of Service</Link> and <Link className="underline" href="/legal/privacy">Privacy Policy</Link>.</span>
       </label>
-      <button className="btn-gold w-full" disabled={busy}>{busy ? "Creating account…" : "Create account"}</button>
+      <Turnstile onToken={setCaptcha} resetKey={captchaReset} />
+      <button className="btn-gold w-full" disabled={busy || (captchaEnabled && !captcha)}>{busy ? "Creating account…" : "Create account"}</button>
       <p className="text-center text-sm text-ink-300">Already have an account? <Link href="/login" className="text-gold-300">Sign in</Link></p>
     </form>
   );

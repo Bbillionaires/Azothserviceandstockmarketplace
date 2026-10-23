@@ -36,6 +36,16 @@ export function FinancePanel() {
     try { const r = await fn(); setMsg({ ok: true, text: text(r) }); await load(); } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
   };
 
+  const partial = (orderId: string, currency: string, max: number, lineIds: string[]) => {
+    const value = prompt(`Amount to refund in ${currency} (up to ${(max / 100).toFixed(2)}, tax included):`);
+    if (!value) return;
+    const cents = Math.round(Number(value) * 100);
+    if (!Number.isFinite(cents) || cents <= 0) return setMsg({ ok: false, text: "Enter a positive amount" });
+    const reason = prompt("Reason: price_adjustment, requested_by_customer, rights_issue, duplicate, other", "price_adjustment") ?? "price_adjustment";
+    act(() => api(`/admin/finance/orders/${orderId}/refund`, { method: "POST", json: { line_ids: lineIds, amount_cents: cents, reason } }),
+      () => `Refunded ${money(cents, currency)}`);
+  };
+
   if (!o) return <p className="mt-6 text-ink-300">{msg?.text ?? "Loading finance…"}</p>;
   const cur = String(o.currency);
   const latest = runs[0];
@@ -92,17 +102,31 @@ export function FinancePanel() {
             <ul className="mt-2 space-y-1 text-ink-300">
               {ord.lines.map((l) => (
                 <li key={l.id} className="flex flex-wrap items-center justify-between gap-2">
-                  <span>{l.asset_title} · {l.license_name} · {money(l.unit_price_cents, ord.currency)} · {label(l.status)}</span>
+                  <span>{l.asset_title} · {l.license_name} · {money(l.unit_price_cents, ord.currency)} · {label(l.status)}
+                    {l.refunded_cents ? <span className="text-xs text-amber-300"> · {money(l.refunded_cents, ord.currency)} refunded</span> : null}</span>
                   {l.status === "fulfilled" && (
-                    <button className="text-xs text-red-300 underline" onClick={() => {
-                      if (confirm(`Refund ${money(l.unit_price_cents + l.tax_cents, ord.currency)} to the buyer? Their license will be revoked.`)) {
-                        act(() => api(`/admin/finance/orders/${ord.id}/refund`, { method: "POST", json: { line_ids: [l.id], reason: "requested_by_customer" } }), () => "Refund issued");
-                      }
-                    }}>Refund line</button>
+                    <span className="flex gap-3">
+                      <button className="text-xs text-amber-300 underline" onClick={() => partial(ord.id, ord.currency, l.unit_price_cents + l.tax_cents - (l.refunded_cents ?? 0), [l.id])}>Partial refund</button>
+                      <button className="text-xs text-red-300 underline" onClick={() => {
+                        if (confirm(`Refund the remaining ${money(l.unit_price_cents + l.tax_cents - (l.refunded_cents ?? 0), ord.currency)} to the buyer? Their license will be revoked.`)) {
+                          act(() => api(`/admin/finance/orders/${ord.id}/refund`, { method: "POST", json: { line_ids: [l.id], reason: "requested_by_customer" } }), () => "Refund issued");
+                        }
+                      }}>Refund line</button>
+                    </span>
                   )}
                 </li>
               ))}
             </ul>
+            {ord.lines.length === 0 && ["paid", "partially_refunded"].includes(ord.status) && (
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-ink-300">
+                <span>{ord.purpose === "milestone" ? "Milestone payment" : "Gallery order"}</span>
+                <span className="flex gap-3">
+                  <button className="text-xs text-amber-300 underline" onClick={() => partial(ord.id, ord.currency, ord.total_cents, [])}>Partial refund</button>
+                  <button className="text-xs text-red-300 underline" onClick={() => confirm("Refund everything still refundable on this order?") &&
+                    act(() => api(`/admin/finance/orders/${ord.id}/refund`, { method: "POST", json: { reason: "requested_by_customer" } }), () => "Refund issued")}>Refund all</button>
+                </span>
+              </div>
+            )}
           </div>
         ))}
       </section>

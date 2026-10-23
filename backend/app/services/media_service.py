@@ -63,6 +63,45 @@ async def save_upload_to_temp(upload: UploadFile, workdir: Path) -> tuple[Path, 
     return dest, detected, size
 
 
+def incoming_key(ext: str) -> str:
+    """Private staging key for an uploaded file awaiting processing."""
+    return f"incoming/{uuid.uuid4().hex}/upload.{ext or 'bin'}"
+
+
+def stage_file(path: Path, ext: str, content_type: str) -> str:
+    key = incoming_key(ext)
+    get_storage().put_file(key, path, content_type, public=False)
+    return key
+
+
+def process_asset_job(asset_id: uuid.UUID, staged_key: str) -> None:
+    """Queue entry point: fetch the staged upload from storage, then process it."""
+    workdir = mp.new_workdir()
+    storage = get_storage()
+    ext = staged_key.rsplit(".", 1)[-1]
+    path = Path(workdir.name) / f"upload.{ext}"
+    try:
+        storage.download_to(staged_key, path)
+    except Exception:  # noqa: BLE001 - staged object missing or unreadable
+        log.exception("staged upload %s unavailable", staged_key)
+        workdir.cleanup()
+        _mark_failed(asset_id, "Upload could not be read. Please upload again.")
+        return
+    process_asset(asset_id, path, workdir)
+    storage.delete(staged_key)
+
+
+def _mark_failed(asset_id: uuid.UUID, message: str) -> None:
+    db = database.SessionLocal()
+    try:
+        asset = db.get(MediaAsset, asset_id)
+        if asset:
+            asset.status, asset.processing_error = MediaStatus.failed, message
+            db.commit()
+    finally:
+        db.close()
+
+
 def process_asset(asset_id: uuid.UUID, original_path: Path, workdir_handle=None) -> None:
     """Background job: scan, extract metadata, store original + previews."""
     db = database.SessionLocal()

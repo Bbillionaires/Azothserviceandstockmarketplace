@@ -92,6 +92,7 @@ class ComplaintIn(BaseModel):
     good_faith_statement: bool
     accuracy_statement: bool
     electronic_signature: str = Field(min_length=2, max_length=200)
+    captcha_token: str | None = Field(default=None, max_length=4096)
 
 
 class ComplaintStatusIn(BaseModel):

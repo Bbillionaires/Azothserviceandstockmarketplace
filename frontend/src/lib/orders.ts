@@ -10,6 +10,8 @@ export type OrderLine = {
   tax_cents: number;
   status: string;
   certificate_number: string | null;
+  refunded_cents?: number;
+  price_listing_id?: string;
 };
 
 export type Order = {

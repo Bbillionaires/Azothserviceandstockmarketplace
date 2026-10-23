@@ -40,7 +40,7 @@ export type Package = {
   rights_terms: string; is_active: boolean;
 };
 
-export type Deliverable = { id: string; filename: string; size_bytes: number; content_type: string; note: string; created_at: string };
+export type Deliverable = { id: string; filename: string; size_bytes: number; content_type: string; note: string; created_at: string; scan_status?: string };
 
 export type ProjectMilestone = {
   id: string; position: number; title: string; description: string; amount_cents: number; due_date: string | null;

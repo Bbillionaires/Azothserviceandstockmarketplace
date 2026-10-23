@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import current_user, verified_user
+from app.core.jobs import enqueue
 from app.core.rate_limit import client_ip, limiter
 from app.core.security import hash_password, sign_download, verify_download, verify_password
 from app.models import (
@@ -21,17 +22,32 @@ from app.models import (
     GalleryComment,
     GalleryItem,
     GalleryItemStatus,
+    GalleryOrder,
+    GalleryOrderStatus,
+    GalleryPrintOption,
     GalleryStatus,
+    Order,
     Project,
     User,
 )
 from app.schemas.common import Message
-from app.schemas.production import GalleryCommentIn, GalleryFlagsIn, GalleryIn, GalleryUnlockIn
+from app.schemas.production import (
+    GalleryCommentIn,
+    GalleryFlagsIn,
+    GalleryIn,
+    GalleryOrderIn,
+    GalleryUnlockIn,
+    PrintOptionIn,
+    ShipIn,
+)
 from app.services import audit, email
+from app.services import gallery_commerce as gc
 from app.services import gallery_service as gs
 from app.services import media_processing as mp
 from app.services import media_service as ms
+from app.services.captcha import require_captcha
 from app.services.notify import notify
+from app.services.payments import PaymentProviderError, get_provider
 from app.services.storage import get_storage
 
 router = APIRouter(tags=["galleries"])
@@ -72,7 +88,11 @@ def gallery_out(db: Session, g: ClientGallery, owner: bool) -> dict:
            "client_approved_at": g.client_approved_at, "expires_at": g.expires_at,
            "items": [gs.item_view(i) for i in items if owner or i.status is GalleryItemStatus.ready],
            "comments": _comments(db, g), "selected_count": sum(1 for i in items if i.is_selected),
-           "creator_name": db.get(CreatorProfile, g.creator_id).display_name}
+           "creator_name": db.get(CreatorProfile, g.creator_id).display_name,
+           "download_price_cents": g.download_price_cents, "currency": g.currency,
+           "print_options": [{"id": o.id, "name": o.name, "price_cents": o.price_cents}
+                             for o in gc.print_options(db, g)],
+           "payments_enabled": get_settings().feature_paid_licensing}
     if owner:
         out |= {"client_email": g.client_email, "has_password": bool(g.password_hash), "project_id": g.project_id,
                 "share_url": f"{get_settings().public_web_url}/g/{g.access_token}", "last_viewed_at": g.last_viewed_at,
@@ -84,6 +104,7 @@ def _apply(g: ClientGallery, body: GalleryIn) -> None:
     g.title, g.message, g.client_name = body.title, body.message, body.client_name
     g.client_email = str(body.client_email) if body.client_email else None
     g.allow_downloads, g.selection_limit = body.allow_downloads, body.selection_limit
+    g.download_price_cents, g.currency = body.download_price_cents, body.currency.upper()
     g.expires_at = datetime.combine(body.expires_at, dtime(23, 59, 59), UTC) if body.expires_at else None
     if body.password:
         g.password_hash = hash_password(body.password)
@@ -154,7 +175,9 @@ async def add_item(gallery_id: uuid.UUID, background: BackgroundTasks, file: Upl
                        size_bytes=size)
     db.add(item)
     db.commit()
-    background.add_task(gs.process_item, item.id, path, workdir)
+    staged = ms.stage_file(path, detected.file_format, detected.content_type)
+    workdir.cleanup()
+    enqueue(gs.process_item_job, item.id, staged, background=background)
     return gs.item_view(item)
 
 
@@ -220,6 +243,7 @@ def public_gallery(token: str, request: Request, db: Session = Depends(get_db)):
 @router.post("/galleries/public/{token}/unlock")
 def unlock_gallery(token: str, body: GalleryUnlockIn, request: Request, db: Session = Depends(get_db)):
     limiter.check(f"gallery-unlock:{client_ip(request)}:{token}", 10)
+    require_captcha(body.captcha_token, client_ip(request))
     g = db.scalar(select(ClientGallery).where(ClientGallery.access_token == token))
     if not g or g.status in (GalleryStatus.draft, GalleryStatus.archived) or not g.password_hash:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Gallery not found")
@@ -290,9 +314,9 @@ def approve_selection(token: str, request: Request, db: Session = Depends(get_db
 @router.post("/galleries/public/{token}/items/{item_id}/download")
 def client_download(token: str, item_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
     g = gs.open_gallery(db, token, request)
-    if not g.allow_downloads:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Downloads are not enabled for this gallery")
     item = _client_item(db, g, item_id)
+    if not g.allow_downloads and not item.download_unlocked:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Downloads are not enabled for this item")
     expires = int(time.time()) + 900
     return {"url": f"{get_settings().api_prefix}/galleries/download/{sign_download(item.id, 'gallery_item', expires)}"}
 
@@ -304,7 +328,8 @@ def gallery_download(token: str, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Link is invalid or has expired")
     item = db.get(GalleryItem, parsed[0])
     g = db.get(ClientGallery, item.gallery_id) if item else None
-    if not item or not item.original_key or not g or not g.allow_downloads or gs.expired(g):
+    if (not item or not item.original_key or not g or gs.expired(g)
+            or not (g.allow_downloads or item.download_unlocked)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
     storage = get_storage()
     presigned = storage.private_download_url(item.original_key, item.filename, 300)
@@ -315,3 +340,82 @@ def gallery_download(token: str, db: Session = Depends(get_db)):
                              headers={"Content-Disposition": f'attachment; filename="{item.filename}"',
                                       "Cache-Control": "private, no-store"})
 
+
+
+# --- Add-on sales: print options, client checkout, creator fulfillment ------------------------------
+
+@router.post("/galleries/{gallery_id}/print-options", status_code=201)
+def add_print_option(gallery_id: uuid.UUID, body: PrintOptionIn, user: User = Depends(verified_user),
+                     db: Session = Depends(get_db)):
+    g = _own_gallery(db, gallery_id, user)
+    if len(gc.print_options(db, g)) >= 20:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Up to 20 print options per gallery")
+    opt = GalleryPrintOption(gallery_id=g.id, name=body.name.strip(), price_cents=body.price_cents)
+    db.add(opt)
+    db.commit()
+    return {"id": opt.id, "name": opt.name, "price_cents": opt.price_cents}
+
+
+@router.delete("/galleries/{gallery_id}/print-options/{option_id}", response_model=Message)
+def remove_print_option(gallery_id: uuid.UUID, option_id: uuid.UUID, user: User = Depends(current_user),
+                        db: Session = Depends(get_db)):
+    g = _own_gallery(db, gallery_id, user)
+    opt = db.get(GalleryPrintOption, option_id)
+    if not opt or opt.gallery_id != g.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Print option not found")
+    opt.is_active = False  # kept for past orders
+    db.commit()
+    return Message(detail="Removed")
+
+
+@router.get("/galleries/{gallery_id}/orders")
+def gallery_orders(gallery_id: uuid.UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    g = _own_gallery(db, gallery_id, user)
+    rows = db.scalars(select(GalleryOrder).where(GalleryOrder.gallery_id == g.id,
+                                                 GalleryOrder.status != GalleryOrderStatus.pending,
+                                                 GalleryOrder.status != GalleryOrderStatus.canceled)
+                      .order_by(GalleryOrder.created_at.desc())).all()
+    return [gc.order_view(db, o) for o in rows]
+
+
+@router.post("/galleries/{gallery_id}/orders/{order_id}/ship")
+def ship_order(gallery_id: uuid.UUID, order_id: uuid.UUID, body: ShipIn, user: User = Depends(verified_user),
+               db: Session = Depends(get_db)):
+    g = _own_gallery(db, gallery_id, user)
+    gorder = db.get(GalleryOrder, order_id)
+    if not gorder or gorder.gallery_id != g.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    gc.mark_shipped(db, gorder, body.carrier, body.tracking_number, user.id)
+    db.commit()
+    return gc.order_view(db, gorder)
+
+
+@router.post("/galleries/public/{token}/orders", status_code=201)
+def client_order(token: str, body: GalleryOrderIn, request: Request, db: Session = Depends(get_db)):
+    limiter.check(f"gallery-order:{client_ip(request)}", 20, 3600)
+    g = gs.open_gallery(db, token, request)
+    if not gc.for_sale(db, g):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing in this gallery is for sale")
+    data = body.model_dump()
+    data["shipping_address"] = body.shipping_address.model_dump() if body.shipping_address else None
+    try:
+        order = gc.create_order(db, get_provider(), g, token, data)
+    except PaymentProviderError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Payment provider error: {exc}") from None
+    db.commit()
+    return {"order_id": order.id, "checkout_url": order.checkout_url, "total_cents": order.subtotal_cents,
+            "currency": order.currency}
+
+
+@router.get("/galleries/public/{token}/orders/{order_id}")
+def client_order_status(token: str, order_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    g = gs.open_gallery(db, token, request)
+    order = db.get(Order, order_id)
+    gorder = gc.gallery_order_for(db, order) if order else None
+    if not gorder or gorder.gallery_id != g.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    view = gc.order_view(db, gorder)
+    view.pop("client_email")
+    view.pop("shipping_address")
+    return view

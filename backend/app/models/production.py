@@ -27,6 +27,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -247,6 +248,17 @@ class Milestone(UUIDPk, Timestamps, Base):
     revisions_used: Mapped[int] = mapped_column(Integer, default=0)
     released_cents: Mapped[int] = mapped_column(Integer, default=0)
     refunded_cents: Mapped[int] = mapped_column(Integer, default=0)
+    # ``refunded_cents`` counts held funds returned before release (pre-tax);
+    # ``reversed_release_cents`` counts released funds returned afterwards.
+    reversed_release_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tax_refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Outstanding released amounts by party (reduced by later refunds/chargebacks).
+    affiliate_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"))
+    release_creator_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    release_affiliate_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    release_platform_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # What a card chargeback pulled back, so a won dispute can restore it exactly.
+    chargeback_snapshot: Mapped[dict | None] = mapped_column(JSON)
 
     project: Mapped[Project] = relationship(back_populates="milestones")
 
@@ -262,7 +274,9 @@ class Deliverable(UUIDPk, Base):
     content_type: Mapped[str] = mapped_column(String(100))
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     storage_key: Mapped[str] = mapped_column(String(500))
-    checksum_sha256: Mapped[str] = mapped_column(String(64))
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64))
+    # not_scanned until the malware-scan job runs for direct uploads
+    scan_status: Mapped[str] = mapped_column(String(20), default="clean", server_default="clean")
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -402,6 +416,9 @@ class ClientGallery(UUIDPk, Timestamps, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     allow_downloads: Mapped[bool] = mapped_column(Boolean, default=False)
     selection_limit: Mapped[int | None] = mapped_column(Integer)
+    # Add-on sales: per-image digital download price (None = not for sale) and prints.
+    download_price_cents: Mapped[int | None] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3), default="USD", server_default="USD")
     status: Mapped[GalleryStatus] = mapped_column(str_enum(GalleryStatus, "gallery_status"), default=GalleryStatus.draft)
     client_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -433,6 +450,7 @@ class GalleryItem(UUIDPk, Base):
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     is_selected: Mapped[bool] = mapped_column(Boolean, default=False)
+    download_unlocked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())  # purchased
     processing_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -446,3 +464,64 @@ class GalleryComment(UUIDPk, Base):
     body: Mapped[str] = mapped_column(Text)
     is_revision_request: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GalleryPrintOption(UUIDPk, Base):
+    """A print product the creator fulfills themselves (e.g. "8×10 lustre print")."""
+
+    __tablename__ = "gallery_print_options"
+    __table_args__ = (CheckConstraint("price_cents >= 100", name="price_minimum"),)
+
+    gallery_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("client_galleries.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    price_cents: Mapped[int] = mapped_column(Integer)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class GalleryOrderStatus(str, enum.Enum):
+    pending = "pending"
+    paid = "paid"
+    shipped = "shipped"  # all print items dispatched (digital-only orders go straight to paid)
+    partially_refunded = "partially_refunded"
+    refunded = "refunded"
+    disputed = "disputed"
+    canceled = "canceled"
+
+
+class GalleryOrder(UUIDPk, Timestamps, Base):
+    __tablename__ = "gallery_orders"
+
+    gallery_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("client_galleries.id", ondelete="RESTRICT"), index=True)
+    order_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("orders.id", ondelete="RESTRICT"), unique=True)
+    client_name: Mapped[str] = mapped_column(String(200))
+    client_email: Mapped[str] = mapped_column(String(320))
+    shipping_address: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[GalleryOrderStatus] = mapped_column(
+        str_enum(GalleryOrderStatus, "gallery_order_status"), default=GalleryOrderStatus.pending
+    )
+    commission_rule_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("revenue_share_rules.id", ondelete="RESTRICT")
+    )
+    # Outstanding amounts by account after refunds ({code: cents}); set at payment.
+    allocation: Mapped[dict] = mapped_column(JSON, default=dict)
+    chargeback_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    carrier: Mapped[str | None] = mapped_column(String(60))
+    tracking_number: Mapped[str | None] = mapped_column(String(120))
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GalleryOrderItem(UUIDPk, Base):
+    __tablename__ = "gallery_order_items"
+    __table_args__ = (CheckConstraint("quantity BETWEEN 1 AND 50", name="quantity_range"),)
+
+    gallery_order_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("gallery_orders.id", ondelete="CASCADE"), index=True
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("gallery_items.id", ondelete="RESTRICT"))
+    kind: Mapped[str] = mapped_column(String(10))  # digital | print
+    print_option_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("gallery_print_options.id", ondelete="RESTRICT")
+    )
+    description: Mapped[str] = mapped_column(String(300))
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    unit_price_cents: Mapped[int] = mapped_column(Integer)

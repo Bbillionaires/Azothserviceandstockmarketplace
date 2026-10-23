@@ -28,7 +28,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -43,6 +43,7 @@ from app.models import (
     GrantSource,
     GrantStatus,
     JournalKind,
+    LedgerJournal,
     LicenseType,
     MediaAsset,
     MediaStatus,
@@ -200,8 +201,10 @@ def fulfill_order(db: Session, order: Order, payment: PaymentDetails) -> None:
     order.processing_fee_cents, order.provider_payment_id = payment.fee_cents, payment.payment_id
 
     weights = [ln.unit_price_cents for ln in order.lines]
-    for ln, tax, fee in zip(order.lines, prorate(order.tax_cents, weights), prorate(order.processing_fee_cents, weights),
-                            strict=True):
+    line_tax = payment.line_tax_cents
+    if not line_tax or len(line_tax) != len(order.lines) or sum(line_tax) != order.tax_cents:
+        line_tax = prorate(order.tax_cents, weights)  # provider gave only an order total
+    for ln, tax, fee in zip(order.lines, line_tax, prorate(order.processing_fee_cents, weights), strict=True):
         ln.tax_cents, ln.processing_fee_cents = tax, fee
 
     entries = [
@@ -281,23 +284,34 @@ def _mirror(lines: list[ledger.Line]) -> list[ledger.Line]:
 
 
 def reverse_earning_rows(db: Session, rows: list[Earning], journal_id: uuid.UUID) -> None:
-    """Reverse unpaid earnings; claw back paid ones with a negative earning."""
+    """Reverse earnings in full: unpaid ones are cancelled, paid ones clawed back."""
+    adjust_earnings(db, {e.id: e.amount_cents + _adjusted(db, e) for e in rows if e.amount_cents > 0}, journal_id)
+
+
+def _adjusted(db: Session, e: Earning) -> int:
+    """Sum of negative adjustments already made against an earning."""
+    return db.scalar(select(func.coalesce(func.sum(Earning.amount_cents), 0)).where(
+        Earning.reverses_earning_id == e.id)) or 0
+
+
+def adjust_earnings(db: Session, amounts: dict[uuid.UUID, int], journal_id: uuid.UUID) -> None:
+    """Record negative adjustments against earnings (refunds, chargebacks).
+
+    The original earning is never edited. An adjustment against an unpaid
+    earning keeps its status and release date, so both release together; an
+    adjustment against a paid earning is available immediately and nets
+    against the payee's next payout (a clawback)."""
     now = utcnow()
-    for e in rows:
-        if e.status is EarningStatus.reversed or e.amount_cents <= 0:
+    for earning_id, amount in amounts.items():
+        if amount <= 0:
             continue
-        already_clawed = db.scalar(select(Earning.id).where(Earning.reverses_earning_id == e.id))
-        if e.status in (EarningStatus.pending, EarningStatus.available):
-            e.status = EarningStatus.reversed
-        elif e.status is EarningStatus.paid and not already_clawed:
-            db.add(Earning(payee_user_id=e.payee_user_id, kind=e.kind, order_line_id=e.order_line_id,
-                           milestone_id=e.milestone_id, amount_cents=-e.amount_cents, currency=e.currency,
-                           status=EarningStatus.available, available_at=now, journal_id=journal_id,
-                           reverses_earning_id=e.id))
-
-
-def _reverse_earnings(db: Session, ln: OrderLine, journal_id: uuid.UUID) -> None:
-    reverse_earning_rows(db, list(db.scalars(select(Earning).where(Earning.order_line_id == ln.id))), journal_id)
+        e = db.get(Earning, earning_id)
+        unpaid = e.status in (EarningStatus.pending, EarningStatus.available)
+        db.add(Earning(payee_user_id=e.payee_user_id, kind=e.kind, order_line_id=e.order_line_id,
+                       milestone_id=e.milestone_id, amount_cents=-amount, currency=e.currency,
+                       status=e.status if unpaid else EarningStatus.available,
+                       available_at=e.available_at if unpaid else now, journal_id=journal_id,
+                       reverses_earning_id=e.id))
 
 
 def _update_order_status(order: Order) -> None:
@@ -306,54 +320,127 @@ def _update_order_status(order: Order) -> None:
         order.status = OrderStatus.refunded
     elif OrderLineStatus.disputed in statuses:
         order.status = OrderStatus.disputed
-    elif OrderLineStatus.refunded in statuses:
+    elif OrderLineStatus.refunded in statuses or any(ln.refunded_cents for ln in order.lines):
         order.status = OrderStatus.partially_refunded
     else:
         order.status = OrderStatus.paid
 
 
+def _line_reversed_so_far(db: Session, ln: OrderLine) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for r in db.scalars(select(Refund).where(Refund.order_line_id == ln.id)):
+        for code, amount in (r.allocation or {}).items():
+            out[code] = out.get(code, 0) + amount
+    return out
+
+
+def _reverse_line(db: Session, ln: OrderLine, amount: int, kind: JournalKind, key: str, memo: str,
+                  actor_id=None) -> tuple[uuid.UUID, dict[str, int]]:
+    """Post a journal returning ``amount`` (price + tax) of a line to clearing.
+
+    Each credited account is reversed in proportion to what is still
+    outstanding on it; the last refund therefore reverses exactly the
+    remainder. Earnings get matching negative adjustments."""
+    credits = _line_credits(db, ln)
+    already = _line_reversed_so_far(db, ln)
+    codes = [c.account_code for c in credits]
+    remaining = [c.credit - already.get(c.account_code, 0) for c in credits]
+    if amount > sum(remaining):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Refund exceeds the amount still refundable on this line")
+    parts = remaining if amount == sum(remaining) else prorate(amount, remaining)
+    allocation = {code: part for code, part in zip(codes, parts, strict=True) if part}
+    owners = {c.account_code: c.owner_user_id for c in credits}
+    entries = [ledger.dr(code, part, memo, owners[code]) for code, part in allocation.items()]
+    entries.append(ledger.cr(f"clearing:{ln.order.provider}", amount, memo))
+    journal = ledger.post(db, kind, key, "order_line", ln.id, memo, ln.currency, entries, created_by=actor_id)
+    adjust_earnings(db, spread_over_earnings(db, list(db.scalars(
+        select(Earning).where(Earning.order_line_id == ln.id))), allocation), journal.id)
+    return journal.id, allocation
+
+
+PAYABLE_FAMILY = {
+    EarningKind.stock_license: "creator_payable",
+    EarningKind.service_milestone: "creator_payable",
+    EarningKind.gallery_sale: "creator_payable",
+    EarningKind.affiliate_commission: "affiliate_payable",
+    EarningKind.referral_bonus: "affiliate_payable",
+}
+
+
+def spread_over_earnings(db: Session, rows: list[Earning], allocation: dict[str, int]) -> dict[uuid.UUID, int]:
+    """Map reversed payable amounts ({account code: cents}) onto the earnings
+    that still have an outstanding balance, newest first."""
+    out: dict[uuid.UUID, int] = {}
+    originals = sorted((e for e in rows if e.amount_cents > 0 and e.reverses_earning_id is None),
+                       key=lambda e: e.created_at, reverse=True)
+    for code, amount in allocation.items():
+        for e in originals:
+            if amount <= 0:
+                break
+            if f"{PAYABLE_FAMILY[e.kind]}:{e.payee_user_id}" != code:
+                continue
+            take = min(amount, e.amount_cents + _adjusted(db, e) - out.get(e.id, 0))
+            if take > 0:
+                out[e.id] = out.get(e.id, 0) + take
+                amount -= take
+    return out
+
+
 def refund_line(db: Session, provider: PaymentProvider | None, ln: OrderLine, reason: RefundReason, note: str,
-                actor_id: uuid.UUID | None, provider_refund_id: str | None = None) -> Refund:
-    """Refund one fulfilled line in full. ``provider=None`` records a refund
-    that already happened at the provider (e.g. issued in the Stripe dashboard)."""
+                actor_id: uuid.UUID | None, provider_refund_id: str | None = None,
+                amount_cents: int | None = None) -> Refund:
+    """Refund a fulfilled line, fully (default) or partially (``amount_cents``,
+    price + tax). ``provider=None`` records a refund that already happened at
+    the provider (e.g. issued in the Stripe dashboard). The license is revoked
+    only once the line is fully refunded."""
     if ln.status is not OrderLineStatus.fulfilled:
         raise HTTPException(status.HTTP_409_CONFLICT, "Only fulfilled lines can be refunded")
     order = ln.order
-    amount = ln.unit_price_cents + ln.tax_cents
+    refundable = ln.unit_price_cents + ln.tax_cents - ln.refunded_cents
+    amount = refundable if amount_cents is None else amount_cents
+    if amount <= 0 or amount > refundable:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Refund must be between 0.01 and {refundable / 100:.2f}")
+    seq = db.scalar(select(func.count(Refund.id)).where(Refund.order_line_id == ln.id)) or 0
+    key = f"refund:{ln.id}" if seq == 0 else f"refund:{ln.id}:{seq}"
     if provider is not None:
         provider_refund_id = provider.refund(payment_id=order.provider_payment_id, amount_cents=amount,
-                                             idempotency_key=f"refund:{ln.id}",
+                                             idempotency_key=key,
                                              metadata={"order_id": str(order.id), "line_id": str(ln.id)})
-    entries = _mirror(_line_credits(db, ln)) + [ledger.cr(f"clearing:{order.provider}", amount, f"refund line {ln.id}")]
-    journal = ledger.post(db, JournalKind.refund, f"refund:{ln.id}", "order_line", ln.id, f"Refund {ln.id}",
-                          ln.currency, entries, created_by=actor_id)
-    _reverse_earnings(db, ln, journal.id)
-    grant = db.get(RightsGrant, ln.rights_grant_id)
-    grant.status, grant.revoked_at, grant.revocation_reason = GrantStatus.refunded, utcnow(), f"Refunded: {reason.value}"
-    ln.status = OrderLineStatus.refunded
+    journal_id, allocation = _reverse_line(db, ln, amount, JournalKind.refund, key, f"Refund line {ln.id}", actor_id)
+    ln.refunded_cents += amount
+    if ln.refunded_cents >= ln.unit_price_cents + ln.tax_cents:
+        grant = db.get(RightsGrant, ln.rights_grant_id)
+        grant.status, grant.revoked_at = GrantStatus.refunded, utcnow()
+        grant.revocation_reason = f"Refunded: {reason.value}"
+        ln.status = OrderLineStatus.refunded
     _update_order_status(order)
     refund = Refund(order_id=order.id, order_line_id=ln.id, amount_cents=amount, currency=ln.currency, reason=reason,
-                    note=note, provider_refund_id=provider_refund_id, journal_id=journal.id, initiated_by=actor_id)
+                    note=note, provider_refund_id=provider_refund_id, journal_id=journal_id, initiated_by=actor_id,
+                    allocation=allocation)
     db.add(refund)
-    audit.record(db, "order.refunded", actor_id, "order_line", ln.id, amount=amount, reason=reason.value)
+    audit.record(db, "order.refunded", actor_id, "order_line", ln.id, amount=amount, reason=reason.value,
+                 partial=ln.status is not OrderLineStatus.refunded)
     db.flush()
     return refund
 
 
 def dispute_order(db: Session, order: Order, dispute_id: str, dispute_fee: int) -> None:
-    """A chargeback pulls the money back: reverse every fulfilled line and suspend its license."""
+    """A chargeback pulls the money back: reverse what remains on every
+    fulfilled line and suspend its license."""
     if order.purpose is OrderPurpose.milestone:
         from app.services.production_service import chargeback_milestone
 
         chargeback_milestone(db, order, dispute_id)
+    elif order.purpose is OrderPurpose.gallery:
+        from app.services.gallery_commerce import chargeback_gallery_order
+
+        chargeback_gallery_order(db, order, dispute_id)
     for ln in order.lines:
         if ln.status is not OrderLineStatus.fulfilled:
             continue
-        amount = ln.unit_price_cents + ln.tax_cents
-        entries = _mirror(_line_credits(db, ln)) + [ledger.cr(f"clearing:{order.provider}", amount, f"dispute {dispute_id}")]
-        journal = ledger.post(db, JournalKind.dispute, f"dispute:{dispute_id}:{ln.id}", "order_line", ln.id,
-                              f"Chargeback {dispute_id}", ln.currency, entries)
-        _reverse_earnings(db, ln, journal.id)
+        outstanding = ln.unit_price_cents + ln.tax_cents - ln.refunded_cents
+        _reverse_line(db, ln, outstanding, JournalKind.dispute, f"dispute:{dispute_id}:{ln.id}",
+                      f"Chargeback {dispute_id}")
         grant = db.get(RightsGrant, ln.rights_grant_id)
         grant.status, grant.revoked_at, grant.revocation_reason = GrantStatus.revoked, utcnow(), "Payment disputed"
         ln.status = OrderLineStatus.disputed
@@ -361,32 +448,42 @@ def dispute_order(db: Session, order: Order, dispute_id: str, dispute_fee: int) 
         ledger.post(db, JournalKind.dispute, f"dispute-fee:{dispute_id}", "order", order.id, f"Dispute fee {dispute_id}",
                     order.currency, [ledger.dr("refund_losses", dispute_fee, dispute_id),
                                      ledger.cr(f"clearing:{order.provider}", dispute_fee, dispute_id)])
-    _update_order_status(order)
+    if order.lines:
+        _update_order_status(order)
     audit.record(db, "order.disputed", None, "order", order.id, dispute=dispute_id)
 
 
 def reinstate_dispute(db: Session, order: Order, dispute_id: str) -> None:
-    """Dispute won: the funds come back, so restore the allocation and licenses."""
+    """Dispute won: the funds come back, so restore exactly what the chargeback
+    reversed (ledger, earnings with a fresh hold, licenses)."""
     if order.purpose is OrderPurpose.milestone:
-        raise ValueError(f"dispute {dispute_id} won on milestone order {order.id}: "
-                         "re-fund the milestone manually with finance review")
+        from app.services.production_service import reinstate_milestone
+
+        reinstate_milestone(db, order, dispute_id)
+        return
+    if order.purpose is OrderPurpose.gallery:
+        from app.services.gallery_commerce import reinstate_gallery_order
+
+        reinstate_gallery_order(db, order, dispute_id)
+        return
     settings = get_settings()
     for ln in order.lines:
         if ln.status is not OrderLineStatus.disputed:
             continue
-        amount = ln.unit_price_cents + ln.tax_cents
-        entries = [ledger.dr(f"clearing:{order.provider}", amount, f"dispute won {dispute_id}"), *_line_credits(db, ln)]
+        reversed_journal = db.scalar(select(LedgerJournal).where(
+            LedgerJournal.idempotency_key == f"dispute:{dispute_id}:{ln.id}"))
+        entries = [ledger.Line(e.account.code, debit=e.credit_cents, credit=e.debit_cents, memo=f"dispute won {dispute_id}",
+                               owner_user_id=e.account.owner_user_id) for e in reversed_journal.entries]
         journal = ledger.post(db, JournalKind.dispute_reinstated, f"dispute-won:{dispute_id}:{ln.id}", "order_line",
                               ln.id, f"Dispute won {dispute_id}", ln.currency, entries)
-        alloc = db.scalar(select(RoyaltyAllocation).where(RoyaltyAllocation.order_line_id == ln.id))
-        creator = db.get(CreatorProfile, ln.creator_id)
         available_at = utcnow() + timedelta(days=settings.earnings_hold_days)
-        for payee, kind, amount in ((creator.user_id, EarningKind.stock_license, alloc.creator_pool_cents),
-                                    (order.affiliate_user_id, EarningKind.affiliate_commission, alloc.affiliate_cents)):
-            if amount:
-                db.add(Earning(payee_user_id=payee, kind=kind, order_line_id=ln.id, amount_cents=amount,
-                               currency=ln.currency, status=EarningStatus.pending, available_at=available_at,
-                               journal_id=journal.id))
+        for e in reversed_journal.entries:
+            family, _, payee = e.account.code.partition(":")
+            if family in ("creator_payable", "affiliate_payable") and e.debit_cents:
+                kind = EarningKind.stock_license if family == "creator_payable" else EarningKind.affiliate_commission
+                db.add(Earning(payee_user_id=uuid.UUID(payee), kind=kind, order_line_id=ln.id,
+                               amount_cents=e.debit_cents, currency=ln.currency, status=EarningStatus.pending,
+                               available_at=available_at, journal_id=journal.id))
         grant = db.get(RightsGrant, ln.rights_grant_id)
         grant.status, grant.revoked_at, grant.revocation_reason = GrantStatus.active, None, None
         ln.status = OrderLineStatus.fulfilled
@@ -436,8 +533,13 @@ def handle_event(db: Session, provider: PaymentProvider, event: ProviderEvent) -
                     if order.purpose is OrderPurpose.milestone:
                         from app.services.production_service import fund_from_payment
 
-                        fund_from_payment(db, order, details)
+                        fund_from_payment(db, order, details, provider)
                         outcome = "milestone_funded"
+                    elif order.purpose is OrderPurpose.gallery:
+                        from app.services.gallery_commerce import fulfill as fulfill_gallery
+
+                        fulfill_gallery(db, order, details)
+                        outcome = "gallery_paid"
                     else:
                         fulfill_order(db, order, details)
                         outcome = "fulfilled"
@@ -474,29 +576,37 @@ def handle_event(db: Session, provider: PaymentProvider, event: ProviderEvent) -
 
 
 def _external_refund(db: Session, charge: dict) -> str:
-    """A refund created outside the platform (e.g. Stripe dashboard).
+    """A refund created outside the platform (e.g. in the Stripe dashboard).
 
-    Full refunds are recorded line by line. Partial refunds cannot be mapped to
-    a royalty reversal automatically and are flagged for finance review."""
+    The newly refunded amount (provider total minus what we already recorded)
+    is spread across the order's refundable lines in proportion to what each
+    can still refund, so partial refunds are booked automatically."""
     order = _order_for(db, charge)
     if not order:
         return "ignored"
-    if order.purpose is OrderPurpose.milestone:
-        recorded = sum(r.amount_cents for r in db.scalars(select(Refund).where(Refund.order_id == order.id)))
-        if int(charge.get("amount_refunded", 0)) <= recorded:
-            return "already_recorded"
-        raise ValueError(f"provider-side refund on milestone order {order.id} needs manual review")
-    open_lines = [ln for ln in order.lines if ln.status is OrderLineStatus.fulfilled]
     recorded = sum(r.amount_cents for r in db.scalars(select(Refund).where(Refund.order_id == order.id)))
-    refunded = int(charge.get("amount_refunded", 0))
-    if refunded <= recorded:
+    delta = int(charge.get("amount_refunded", 0)) - recorded
+    if delta <= 0:
         return "already_recorded"
-    if refunded >= int(charge.get("amount", 0)) and open_lines:
-        for ln in open_lines:
-            refund_line(db, None, ln, RefundReason.other, "Refund issued at the payment provider", None,
-                        provider_refund_id=None)
+    if order.purpose is OrderPurpose.milestone:
+        from app.services.production_service import external_milestone_refund
+
+        external_milestone_refund(db, order, delta)
         return "refunded"
-    raise ValueError(f"partial provider-side refund of {refunded} on order {order.id} needs manual review")
+    if order.purpose is OrderPurpose.gallery:
+        from app.services.gallery_commerce import refund_gallery_order
+
+        refund_gallery_order(db, None, order, delta, RefundReason.other, "Refund issued at the payment provider", None)
+        return "refunded"
+    lines = [ln for ln in order.lines if ln.status is OrderLineStatus.fulfilled]
+    capacity = [ln.unit_price_cents + ln.tax_cents - ln.refunded_cents for ln in lines]
+    if delta > sum(capacity):
+        raise ValueError(f"provider refunded {delta} on order {order.id}, more than is refundable")
+    for ln, part in zip(lines, prorate(delta, capacity), strict=True):
+        if part:
+            refund_line(db, None, ln, RefundReason.other, "Refund issued at the payment provider", None,
+                        amount_cents=part)
+    return "refunded"
 
 
 def sync_account(db: Session, acct: dict) -> str:

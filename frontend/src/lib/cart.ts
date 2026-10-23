@@ -54,7 +54,9 @@ export function useCart() {
   const update = useCallback((id: string, patch: Partial<CartItem>) =>
     write(read().map((i) => (i.price_listing_id === id ? { ...i, ...patch } : i))), []);
   const clear = useCallback(() => write([]), []);
-  return { items, add, remove, update, clear };
+  /** Remove the items a paid order covered (one order per currency). */
+  const removeListings = useCallback((ids: string[]) => write(read().filter((i) => !ids.includes(i.price_listing_id))), []);
+  return { items, add, remove, update, clear, removeListings };
 }
 
 /** Remember a ?ref= referral code seen on any page until registration. */

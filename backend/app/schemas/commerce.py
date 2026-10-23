@@ -26,6 +26,8 @@ class OrderLineOut(BaseModel):
     tax_cents: int
     status: str
     certificate_number: str | None
+    refunded_cents: int = 0
+    price_listing_id: uuid.UUID | None = None
 
 
 class OrderOut(BaseModel):
@@ -61,6 +63,7 @@ class EarningOut(BaseModel):
 
 class EarningsSummary(BaseModel):
     currency: str
+    currencies: list[str] = ["USD"]
     pending_cents: int
     available_cents: int
     paid_cents: int
@@ -84,6 +87,7 @@ class PayoutOut(BaseModel):
 
 class RefundIn(BaseModel):
     line_ids: list[uuid.UUID] = Field(default_factory=list, description="Empty = every fulfilled line")
+    amount_cents: int | None = Field(default=None, gt=0, description="Partial refund (price + tax); one line only")
     reason: str = "requested_by_customer"
     note: str = Field(default="", max_length=2000)
 

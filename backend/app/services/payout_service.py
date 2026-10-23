@@ -24,9 +24,10 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models import (
     Earning,
-    EarningKind,
     EarningStatus,
     FinancialEvent,
+    GalleryOrder,
+    GalleryOrderItem,
     JournalKind,
     LedgerAccount,
     LedgerJournal,
@@ -46,23 +47,28 @@ from app.models import (
     RoyaltyAllocation,
 )
 from app.services import audit, ledger
+from app.services.payment_service import PAYABLE_FAMILY as PAYABLE_PREFIX
 from app.services.payment_service import utcnow
 from app.services.payments import PaymentProvider, PaymentProviderError
 
 log = logging.getLogger("payouts")
 
-PAYABLE_PREFIX = {
-    EarningKind.stock_license: "creator_payable",
-    EarningKind.service_milestone: "creator_payable",
-    EarningKind.affiliate_commission: "affiliate_payable",
-}
 
 
 def release_earnings(db: Session) -> int:
-    rows = db.scalars(select(Earning).where(Earning.status == EarningStatus.pending, Earning.available_at <= utcnow())).all()
+    from app.services.referral_service import maybe_pay_creator_bonus
+
+    rows = db.scalars(select(Earning).where(Earning.status == EarningStatus.pending, Earning.available_at <= utcnow())
+                      .order_by(Earning.created_at)).all()
     for e in rows:
         e.status = EarningStatus.available
     db.flush()
+    for e in rows:
+        if e.reverses_earning_id is None:
+            # Net of any adjustments released at the same time (e.g. partial refunds).
+            net = e.amount_cents + sum(a.amount_cents for a in rows if a.reverses_earning_id == e.id)
+            if net > 0 and maybe_pay_creator_bonus(db, e):
+                db.flush()
     return len(rows)
 
 
@@ -195,7 +201,8 @@ def balances_for(db: Session, user_id, currency: str = "USD") -> dict:
 
 # --- Reconciliation ----------------------------------------------------------------------
 
-def reconcile(db: Session, triggered_by=None) -> ReconciliationRun:
+def reconcile(db: Session, triggered_by=None, provider: PaymentProvider | None = None,
+              provider_days: int = 7) -> ReconciliationRun:
     run = ReconciliationRun(status="running", triggered_by=triggered_by)
     db.add(run)
     db.flush()
@@ -232,13 +239,21 @@ def reconcile(db: Session, triggered_by=None) -> ReconciliationRun:
     orders_ok = True
     for order in db.scalars(select(Order).where(Order.status != OrderStatus.pending, Order.status != OrderStatus.canceled)):
         milestone_order = order.purpose is OrderPurpose.milestone
-        key = f"milestone-funding:{order.id}" if milestone_order else f"sale:{order.id}"
+        key = {OrderPurpose.milestone: f"milestone-funding:{order.id}",
+               OrderPurpose.gallery: f"gallery-sale:{order.id}"}.get(order.purpose, f"sale:{order.id}")
         if not db.scalar(select(LedgerJournal.id).where(LedgerJournal.idempotency_key == key)):
             orders_ok = False
             findings.append({"check": "orders_journaled", "order": str(order.id)})
         if milestone_order:
             m = db.get(Milestone, order.milestone_id)
             if not m or m.amount_cents != order.subtotal_cents:
+                orders_ok = False
+                findings.append({"check": "order_totals", "order": str(order.id)})
+        elif order.purpose is OrderPurpose.gallery:
+            gorder = db.scalar(select(GalleryOrder).where(GalleryOrder.order_id == order.id))
+            items = db.scalars(select(GalleryOrderItem).where(
+                GalleryOrderItem.gallery_order_id == gorder.id)).all() if gorder else []
+            if not gorder or sum(i.unit_price_cents * i.quantity for i in items) != order.subtotal_cents:
                 orders_ok = False
                 findings.append({"check": "order_totals", "order": str(order.id)})
         elif sum(ln.unit_price_cents for ln in order.lines) != order.subtotal_cents or \
@@ -279,6 +294,13 @@ def reconcile(db: Session, triggered_by=None) -> ReconciliationRun:
     checks["events_processed"] = not failed_events
     findings += [{"check": "events_processed", "event": e.provider_event_id, "error": e.processing_error[:200]}
                  for e in failed_events]
+
+    if provider is not None:
+        from app.services.provider_reconciliation import compare
+
+        provider_findings = compare(db, provider, utcnow() - timedelta(days=provider_days))
+        checks["provider_matches"] = not provider_findings
+        findings += provider_findings
 
     checks["clearing_balance_cents"] = {
         f"{a.code} {a.currency}": ledger.balance(db, a.code, a.currency)

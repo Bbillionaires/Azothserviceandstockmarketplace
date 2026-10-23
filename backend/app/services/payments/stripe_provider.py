@@ -11,6 +11,7 @@ import stripe
 
 from app.services.payments.base import (
     AccountState,
+    BalanceActivity,
     CheckoutItem,
     CheckoutSession,
     PaymentDetails,
@@ -81,6 +82,10 @@ class StripeProvider:
         charge = _get(intent, "latest_charge")
         txn = _get(charge, "balance_transaction")
         totals = _get(session, "total_details") or {}
+        line_tax = None
+        if int(_get(totals, "amount_tax", 0) or 0):
+            items = self._call(stripe.checkout.Session.list_line_items, session=session_id, limit=100)
+            line_tax = [int(_get(i, "amount_tax", 0) or 0) for i in _get(items, "data", [])]
         return PaymentDetails(
             session_id=session_id,
             payment_id=_get(intent, "id") or str(intent or ""),
@@ -89,6 +94,8 @@ class StripeProvider:
             amount_total_cents=int(_get(session, "amount_total", 0) or 0),
             amount_tax_cents=int(_get(totals, "amount_tax", 0) or 0),
             fee_cents=int(_get(txn, "fee", 0) or 0),
+            line_tax_cents=line_tax,
+            charge_id=_get(charge, "id"),
         )
 
     def parse_webhook(self, payload: bytes, signature: str | None) -> ProviderEvent:
@@ -154,3 +161,26 @@ class StripeProvider:
         refund = self._call(stripe.Refund.create, payment_intent=payment_id, amount=amount_cents,
                             metadata=metadata, idempotency_key=idempotency_key)
         return refund.id
+
+    def balance_activity(self, since: int, until: int) -> list[BalanceActivity]:
+        page = self._call(stripe.BalanceTransaction.list, created={"gte": since, "lt": until},
+                          expand=["data.source"], limit=100)
+        out = []
+        for txn in page.auto_paging_iter():
+            source = _get(txn, "source")
+            kind = _get(txn, "type")
+            amount = int(_get(txn, "amount", 0) or 0)
+            base = {"id": _get(txn, "id"), "fee_cents": int(_get(txn, "fee", 0) or 0),
+                    "currency": str(_get(txn, "currency", "")).upper(), "created": int(_get(txn, "created", 0) or 0)}
+            if kind in ("charge", "payment"):
+                out.append(BalanceActivity(type="charge", amount_cents=amount,
+                                           payment_id=_get(source, "payment_intent"), **base))
+            elif kind in ("refund", "payment_refund"):
+                out.append(BalanceActivity(type="refund", amount_cents=-amount,
+                                           payment_id=_get(source, "payment_intent"), **base))
+            elif kind == "transfer":
+                out.append(BalanceActivity(type="transfer", amount_cents=-amount,
+                                           transfer_id=_get(source, "id") or source, **base))
+            else:
+                out.append(BalanceActivity(type="other", amount_cents=amount, **base))
+        return out

@@ -23,6 +23,7 @@ from app.api.v1 import (
     public_config,
     search,
     trust,
+    uploads,
 )
 from app.core.config import get_settings
 from app.services.storage import LocalStorage, get_storage
@@ -56,7 +57,7 @@ def create_app() -> FastAPI:
         return response
 
     for module in (auth, creators, agreements, media, search, licenses, library, trust, orders, earnings, production,
-                   messages, galleries, admin, admin_finance, public_config):
+                   messages, galleries, uploads, admin, admin_finance, public_config):
         app.include_router(module.router, prefix=settings.api_prefix)
 
     @app.get("/health", tags=["ops"])

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.creators import my_profile
 from app.core.database import get_db
 from app.core.deps import current_user, optional_user, verified_user
+from app.core.jobs import enqueue
 from app.core.rate_limit import client_ip, limiter
 from app.models import (
     AgreementStatus,
@@ -141,7 +142,9 @@ async def upload_media(
     audit.record(db, "media.uploaded", user.id, "media_asset", asset.id, client_ip(request),
                  media_type=detected.media_type.value, size=size, agreement=agreement.id)
     db.commit()
-    background.add_task(ms.process_asset, asset.id, path, workdir)
+    staged = ms.stage_file(path, detected.file_format, detected.content_type)
+    workdir.cleanup()
+    enqueue(ms.process_asset_job, asset.id, staged, background=background)
     return ms.to_detail(asset, creator, [])
 
 

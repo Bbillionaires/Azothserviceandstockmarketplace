@@ -1,5 +1,6 @@
 import uuid
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -143,10 +144,48 @@ class GalleryIn(BaseModel):
     expires_at: date | None = None
     allow_downloads: bool = False
     selection_limit: int | None = Field(default=None, ge=1, le=10_000)
+    # Add-on sales: per-image digital download price (None = not for sale).
+    download_price_cents: int | None = Field(default=None, ge=100, le=10_000_000)
+    currency: str = Field(default="USD", pattern="^[A-Za-z]{3}$")
+
+
+class PrintOptionIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    price_cents: int = Field(ge=100, le=10_000_000)
+
+
+class GalleryOrderItemIn(BaseModel):
+    item_id: uuid.UUID
+    kind: Literal["digital", "print"]
+    print_option_id: uuid.UUID | None = None
+    quantity: int = Field(default=1, ge=1, le=50)
+
+
+class ShippingAddressIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    line1: str = Field(min_length=1, max_length=200)
+    line2: str = Field(default="", max_length=200)
+    city: str = Field(min_length=1, max_length=120)
+    region: str = Field(default="", max_length=120)
+    postal_code: str = Field(default="", max_length=20)
+    country: str = Field(pattern="^[A-Za-z]{2}$")
+
+
+class GalleryOrderIn(BaseModel):
+    client_name: str = Field(min_length=1, max_length=200)
+    client_email: EmailStr
+    items: list[GalleryOrderItemIn] = Field(min_length=1, max_length=100)
+    shipping_address: ShippingAddressIn | None = None
+
+
+class ShipIn(BaseModel):
+    carrier: str = Field(min_length=2, max_length=60)
+    tracking_number: str = Field(min_length=3, max_length=120)
 
 
 class GalleryUnlockIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
+    captcha_token: str | None = Field(default=None, max_length=4096)
 
 
 class GalleryCommentIn(BaseModel):

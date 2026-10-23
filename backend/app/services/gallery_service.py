@@ -42,6 +42,21 @@ def item_key(gallery_id, item_id, name: str) -> str:
     return f"galleries/{gallery_id}/{item_id}/{uuid.uuid4().hex}/{name}"
 
 
+def process_item_job(item_id: uuid.UUID, staged_key: str) -> None:
+    """Queue entry point: fetch the staged upload from storage, then process it."""
+    workdir = mp.new_workdir()
+    storage = get_storage()
+    path = Path(workdir.name) / f"upload.{staged_key.rsplit('.', 1)[-1]}"
+    try:
+        storage.download_to(staged_key, path)
+    except Exception:  # noqa: BLE001
+        log.exception("staged gallery upload %s unavailable", staged_key)
+        workdir.cleanup()
+        return
+    process_item(item_id, path, workdir)
+    storage.delete(staged_key)
+
+
 def process_item(item_id: uuid.UUID, path: Path, workdir_handle=None) -> None:
     db = database.SessionLocal()
     storage = get_storage()
@@ -94,6 +109,7 @@ def item_view(item: GalleryItem, include_flags: bool = True) -> dict:
         "thumbnail_url": storage.public_url(item.thumbnail_key) if item.thumbnail_key else None,
         "width": item.width, "height": item.height, "is_favorite": item.is_favorite,
         "is_selected": item.is_selected, "processing_error": item.processing_error,
+        "download_unlocked": item.download_unlocked,
     }
 
 

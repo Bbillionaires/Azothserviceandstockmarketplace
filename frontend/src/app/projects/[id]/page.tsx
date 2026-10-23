@@ -7,6 +7,7 @@ import { Alert } from "@/components/Alert";
 import { Thread } from "@/components/Thread";
 import { api, label, money } from "@/lib/api";
 import { RIGHTS_LABEL, fileSize, type Project, type ProjectMilestone } from "@/lib/production";
+import { uploadFile } from "@/lib/upload";
 
 const STATUS_STYLE: Record<string, string> = {
   unfunded: "text-ink-300", funded: "text-sky-300", submitted: "text-gold-300", revision_requested: "text-amber-300",
@@ -126,14 +127,17 @@ function MilestoneCard({ m, project, act, isClient, isCreator }: {
   const [reason, setReason] = useState("quality");
   const held = ["funded", "submitted", "revision_requested"].includes(m.status);
 
+  const [progress, setProgress] = useState<number | null>(null);
   const upload = async () => {
     if (!file) return;
-    const data = new FormData();
-    data.set("file", file);
-    data.set("note", note);
-    const res = await fetch(`/api/v1/milestones/${m.id}/deliverables`, { method: "POST", body: data, credentials: "include", headers: { "X-Requested-With": "fetch" } });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({ detail: "Upload failed" }))).detail ?? "Upload failed");
-    setFile(null);
+    setProgress(0);
+    try {
+      const uploadId = await uploadFile(file, "deliverable", m.id, setProgress);
+      await api(`/milestones/${m.id}/deliverables/from-upload`, { method: "POST", json: { upload_id: uploadId, note } });
+      setFile(null);
+    } finally {
+      setProgress(null);
+    }
   };
 
   const download = async (id: string) => {
@@ -161,7 +165,9 @@ function MilestoneCard({ m, project, act, isClient, isCreator }: {
           {m.deliverables.map((d) => (
             <li key={d.id} className="flex items-center justify-between gap-2">
               <span>{d.filename} <span className="text-xs text-ink-400">{fileSize(d.size_bytes)}{d.note ? ` · ${d.note}` : ""}</span></span>
-              <button className="text-xs text-gold-300 underline" onClick={() => download(d.id)}>Download</button>
+              {d.scan_status === "pending"
+                ? <span className="text-xs text-ink-400">Checking file…</span>
+                : <button className="text-xs text-gold-300 underline" onClick={() => download(d.id)}>Download</button>}
             </li>
           ))}
         </ul>
@@ -189,7 +195,7 @@ function MilestoneCard({ m, project, act, isClient, isCreator }: {
             <input id={`f-${m.id}`} type="file" className="text-sm" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
             <input aria-label="Delivery note" className="input py-1 text-sm" placeholder="Note for the client (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
             <div className="flex gap-2">
-              <button className="btn-ghost text-sm" disabled={!file} onClick={() => act(upload, "File uploaded")}>Upload</button>
+              <button className="btn-ghost text-sm" disabled={!file || progress !== null} onClick={() => act(upload, "File uploaded")}>{progress !== null ? `Uploading ${progress}%` : "Upload"}</button>
               <button className="btn-gold text-sm" disabled={!m.deliverables.length} onClick={() => act(() => api(`/milestones/${m.id}/submit`, { method: "POST", json: { note } }), "Delivered to the client")}>Submit delivery</button>
             </div>
           </div>

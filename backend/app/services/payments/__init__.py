@@ -5,6 +5,7 @@ from functools import lru_cache
 from app.core.config import get_settings
 from app.services.payments.base import (
     AccountState,
+    BalanceActivity,
     CheckoutItem,
     CheckoutSession,
     PaymentDetails,
@@ -28,6 +29,6 @@ def get_provider() -> PaymentProvider:
 
 
 __all__ = [
-    "AccountState", "CheckoutItem", "CheckoutSession", "PaymentDetails", "PaymentProvider",
+    "AccountState", "BalanceActivity", "CheckoutItem", "CheckoutSession", "PaymentDetails", "PaymentProvider",
     "PaymentProviderError", "ProviderEvent", "get_provider",
 ]

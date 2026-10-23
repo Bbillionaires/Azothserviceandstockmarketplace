@@ -28,6 +28,23 @@ vercel login
 3. **R2 → Manage API tokens** → create a token with *Object Read & Write* on
    both buckets. Note the Access Key ID, Secret Access Key and the S3 endpoint
    `https://<account-id>.r2.cloudflarestorage.com`.
+4. Browsers upload files straight to `media-originals` with presigned PUT URLs
+   (the API never buffers large video). On `media-originals` → **Settings →
+   CORS policy**, add:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://<your-vercel-domain>"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["Content-Type"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+   Staged uploads land under `incoming/`; add a lifecycle rule that deletes
+   `incoming/` objects older than 2 days (abandoned uploads).
 
 ## 2. API on Railway
 
@@ -36,7 +53,9 @@ vercel login
    picks up `backend/railway.json` and builds `backend/Dockerfile` (Python 3.13
    + FFmpeg). The container runs `alembic upgrade head`, seeds reference data,
    then starts Uvicorn on `$PORT`. Health check: `/health`.
-3. **New → Database → PostgreSQL** in the same project.
+3. **New → Database → PostgreSQL** and **New → Database → Redis** in the same
+   project. Redis carries the job queue and the shared rate limiter; the API
+   refuses to start in production without `REDIS_URL`.
 4. API service **Variables** (Raw editor):
 
 ```
@@ -54,11 +73,11 @@ S3_SECRET_ACCESS_KEY=<r2 secret>
 S3_PRIVATE_BUCKET=media-originals
 S3_PUBLIC_BUCKET=media-previews
 PUBLIC_MEDIA_BASE_URL=https://media.yourdomain.com
-EMAIL_BACKEND=smtp
-SMTP_HOST=<provider host>
-SMTP_PORT=587
-SMTP_USERNAME=<user>
-SMTP_PASSWORD=<password>
+REDIS_URL=${{Redis.REDIS_URL}}
+EMAIL_BACKEND=resend
+EMAIL_FROM=<Brand> <no-reply@yourdomain.com>
+RESEND_API_KEY=<resend api key>
+TURNSTILE_SECRET_KEY=<cloudflare turnstile secret>
 BRAND_NAME=<final brand>
 BRAND_SUPPORT_EMAIL=support@yourdomain.com
 MALWARE_SCANNER=clamav
@@ -69,7 +88,28 @@ FEATURE_EXCLUSIVE_LICENSING=false
 ```
 
    Startup fails on purpose if `SECRET_KEY` is the dev default,
-   `COOKIE_SECURE` is false, or storage is not S3.
+   `COOKIE_SECURE` is false, storage is not S3, or `REDIS_URL` is missing.
+
+   *Email:* in Resend, add and verify your sending domain (SPF/DKIM DNS
+   records) before using it in `EMAIL_FROM`. SMTP works too:
+   `EMAIL_BACKEND=smtp` with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
+   `SMTP_PASSWORD`.
+
+   *CAPTCHA:* Cloudflare dashboard → **Turnstile → Add site** for your web
+   domain (managed mode). The secret goes here; the site key goes on Vercel as
+   `NEXT_PUBLIC_TURNSTILE_SITE_KEY`. Set both or neither.
+
+4b. **Worker service.** New → **GitHub Repo** (same repo), Root Directory
+   `backend`, same variables as the API (use Railway's *shared variables*).
+   Override the start command:
+
+```
+rq worker default --url $REDIS_URL --with-scheduler
+```
+
+   It processes uploads (watermarking, video previews), gallery items and
+   deliverable malware scans, retrying failed jobs three times. Scale it
+   independently of the API; video transcoding wants at least 2 GB of RAM.
 
 5. ClamAV (recommended before public uploads): **New → Docker Image →
    `clamav/clamav:stable`**. Give it at least 2 GB of RAM and use its private
@@ -98,6 +138,7 @@ NEXT_PUBLIC_BRAND_TAGLINE=Licensed photography, footage and production talent wo
 NEXT_PUBLIC_SUPPORT_EMAIL=support@yourdomain.com
 NEXT_PUBLIC_BRAND_LOGO_URL=
 NEXT_PUBLIC_HERO_VIDEO_URL=https://media.yourdomain.com/brand/hero.mp4
+NEXT_PUBLIC_TURNSTILE_SITE_KEY=<cloudflare turnstile site key>
 ```
 
 4. Deploy. Add your custom domain under **Settings → Domains**, then update
@@ -110,8 +151,10 @@ called cross-origin by the browser.
 ## 4. After every deploy
 
 * Railway runs migrations automatically on start.
-* Smoke test: register, verify email, open storefront, accept agreement,
-  upload a photo, approve it as admin, search for it, download it free.
+* Smoke test: register (CAPTCHA shows), verify email (arrives through Resend),
+  open storefront, accept agreement, upload a photo (watch the upload go
+  straight to R2 and the worker log process it), approve it as admin, search
+  for it, download it free.
 * Watch Railway logs and the error tracker for 15 minutes.
 
 ## 5. Backups and monitoring
@@ -136,7 +179,10 @@ both Stripe secrets are set.
 2. **Tax (optional).** To have Stripe calculate sales tax and VAT, enable
    Stripe Tax, add your registrations, and set `STRIPE_TAX_ENABLED=true`.
    License lines use product tax code `txcd_10000000` (general electronically
-   supplied services). Confirm the right code with your tax adviser.
+   supplied services), milestone payments `txcd_20030000` (general services),
+   gallery downloads `txcd_10501000` (digital photographs) and prints
+   `txcd_99999999` (tangible goods). Confirm the codes with your tax adviser.
+   Tax is booked per line from the Checkout line items.
 3. **Webhook endpoints.** Both use the same URL:
    `https://<your-web-domain>/api/v1/payments/webhooks/stripe` (Vercel proxies
    it to Railway).
@@ -159,6 +205,7 @@ STRIPE_TAX_ENABLED=false
 EARNINGS_HOLD_DAYS=14
 MIN_PAYOUT_CENTS=1000
 REFERRAL_ATTRIBUTION_DAYS=365
+REFERRAL_CREATOR_BONUS_CENTS=2500
 FEATURE_PAID_LICENSING=true
 ```
 
@@ -172,7 +219,19 @@ stripe listen --forward-to localhost:8000/api/v1/payments/webhooks/stripe
    Then buy a license with card `4242 4242 4242 4242`. Check the
    certificate, the creator's pending earnings, and a clean reconciliation.
    Refund the order from Admin → Finance, and test a dispute with card
-   `4000 0000 0000 0259`.
+   `4000 0000 0000 0259`. Also check:
+   * a **partial refund** from Admin → Finance, then a second partial refund
+     issued in the Stripe dashboard (it is booked automatically from
+     `charge.refunded`);
+   * a booking: fund a milestone, approve it, then refund part of it from
+     Admin → Finance (the creator's earning shows a clawback);
+   * a client-gallery order (download + print) paid without an account;
+   * **Run reconciliation**: the `provider_matches` check compares Stripe
+     balance activity (charges, fees, refunds, transfers) with the ledger.
+
+   The fake provider used in development keeps its activity in memory, so
+   `provider_matches` reports old charges as missing after an API restart.
+   That is expected locally; with Stripe the activity is read from the API.
 
 ## 7. Daily finance job
 

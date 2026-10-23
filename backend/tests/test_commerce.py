@@ -431,11 +431,14 @@ def test_stripe_payment_details_and_calls(monkeypatch):
         return Obj(id="cs_1", url="https://checkout.stripe.com/c/pay/cs_1")
 
     monkeypatch.setattr(stripe.checkout.Session, "retrieve", fake_retrieve)
+    monkeypatch.setattr(stripe.checkout.Session, "list_line_items",
+                        lambda **kw: {"data": [{"amount_tax": 200}, {"amount_tax": 32}]})
     monkeypatch.setattr(stripe.checkout.Session, "create", fake_create)
     provider = StripeProvider("sk_test_x", "whsec_test", tax_enabled=True)
     details = provider.payment_details("cs_1")
     assert (details.payment_id, details.amount_total_cents, details.amount_tax_cents, details.fee_cents) == \
         ("pi_1", 3132, 232, 121)
+    assert details.line_tax_cents == [200, 32]
     assert calls["retrieve"]["expand"] == ["payment_intent.latest_charge.balance_transaction"]
     from app.services.payments import CheckoutItem
 

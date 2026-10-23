@@ -14,6 +14,7 @@ class RegisterIn(BaseModel):
     country_code: str | None = Field(default=None, min_length=2, max_length=2)
     referral_code: str | None = Field(default=None, max_length=40)
     accept_terms: bool
+    captcha_token: str | None = Field(default=None, max_length=4096)
 
     @field_validator("accept_terms")
     @classmethod
@@ -44,6 +45,7 @@ class TokenIn(BaseModel):
 
 class EmailIn(BaseModel):
     email: EmailStr
+    captcha_token: str | None = Field(default=None, max_length=4096)
 
 
 class PasswordResetIn(BaseModel):

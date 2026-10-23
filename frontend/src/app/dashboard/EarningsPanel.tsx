@@ -6,6 +6,7 @@ import { api, label, money } from "@/lib/api";
 
 type Summary = {
   currency: string;
+  currencies: string[];
   pending_cents: number;
   available_cents: number;
   paid_cents: number;
@@ -14,7 +15,7 @@ type Summary = {
   next_release_at: string | null;
   hold_days: number;
   min_payout_cents: number;
-  payout_account: { status: string; payouts_enabled: boolean; requirements_due: string[] } | null;
+  payout_account: { status: string; payouts_enabled: boolean; requirements_due: string[]; tax_info_status: string } | null;
 };
 type Row = {
   id: string; kind: string; status: string; amount_cents: number; currency: string; available_at: string;
@@ -32,14 +33,18 @@ export function EarningsPanel() {
   const [error, setError] = useState("");
   const month = new Date().toISOString().slice(0, 7);
   const [statementMonth, setStatementMonth] = useState(month);
+  const [currency, setCurrency] = useState("USD");
+
+  useEffect(() => {
+    api<Summary>(`/earnings/summary?currency=${currency}`).then(setS).catch((e) => setError(e.message));
+  }, [currency]);
 
   useEffect(() => {
     Promise.all([
-      api<Summary>("/earnings/summary"),
       api<{ items: Row[] }>("/earnings?page_size=100"),
       api<PayoutRow[]>("/payouts"),
-      api("/payouts/account").catch(() => null),
-    ]).then(([sum, r, p]) => { setS(sum); setRows(r.items); setPayouts(p); }).catch((e) => setError(e.message));
+      api("/payouts/account").catch(() => null), // refreshes the account state from the provider
+    ]).then(([r, p]) => { setRows(r.items); setPayouts(p); }).catch((e) => setError(e.message));
   }, []);
 
   const onboard = async () => {
@@ -57,6 +62,15 @@ export function EarningsPanel() {
   return (
     <div className="space-y-8">
       {error && <Alert>{error}</Alert>}
+      {s.currencies.length > 1 && (
+        <div className="flex items-center gap-2 text-sm">
+          <label htmlFor="ecur" className="text-ink-300">Currency</label>
+          <select id="ecur" className="input w-auto py-1" value={s.currency} onChange={(e) => setCurrency(e.target.value)}>
+            {s.currencies.map((c) => <option key={c}>{c}</option>)}
+          </select>
+          <span className="text-xs text-ink-400">Balances and payouts are kept separately per currency.</span>
+        </div>
+      )}
       <dl className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {[
           ["Pending", s.pending_cents, `Held ${s.hold_days} days for refunds and chargebacks`],
@@ -93,6 +107,13 @@ export function EarningsPanel() {
               <button className="btn-gold" onClick={onboard}>{acct ? "Continue setup" : "Set up payouts"}</button>
             </div>
           </>
+        )}
+        {acct && (
+          <p className="text-xs text-ink-400">
+            Tax information: <span className={acct.tax_info_status === "required" ? "text-amber-300" : acct.tax_info_status === "provided" ? "text-emerald-300" : ""}>
+              {{ required: "action required", provided: "provided", pending: "not yet submitted" }[acct.tax_info_status] ?? acct.tax_info_status}
+            </span>. Tax forms (W-9 / W-8) are collected by our payment provider during payout setup{acct.tax_info_status === "required" ? "; use “Continue setup” to complete them" : ""}.
+          </p>
         )}
       </section>
 

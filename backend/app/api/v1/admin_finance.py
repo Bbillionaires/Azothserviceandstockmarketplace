@@ -15,8 +15,11 @@ from app.models import (
     EarningStatus,
     FinancialEvent,
     LedgerAccount,
+    Milestone,
+    MilestoneStatus,
     Order,
     OrderLineStatus,
+    OrderPurpose,
     OrderStatus,
     Payout,
     PayoutStatus,
@@ -44,7 +47,8 @@ def overview(currency: str = "USD", _: User = Depends(finance), db: Session = De
         select(func.coalesce(func.sum(Order.subtotal_cents), 0), func.count(Order.id)).where(*revenue_orders)
     ).one()
     buyer_counts = db.execute(select(Order.buyer_user_id, func.count()).where(
-        Order.status.in_(REVENUE_STATUSES), Order.currency == currency).group_by(Order.buyer_user_id)).all()
+        Order.status.in_(REVENUE_STATUSES), Order.currency == currency,
+        Order.buyer_user_id.is_not(None)).group_by(Order.buyer_user_id)).all()
     refunds = db.scalar(select(func.coalesce(func.sum(Refund.amount_cents), 0)).where(Refund.currency == currency)) or 0
 
     def earned(kind):
@@ -84,8 +88,9 @@ def list_orders(status_filter: OrderStatus | None = Query(None, alias="status"),
     orders = db.scalars(stmt.order_by(Order.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     items = []
     for o in orders:
-        buyer = db.get(User, o.buyer_user_id)
-        items.append(order_out(db, o) | {"buyer_email": buyer.email, "processing_fee_cents": o.processing_fee_cents})
+        buyer = db.get(User, o.buyer_user_id) if o.buyer_user_id else None
+        items.append(order_out(db, o) | {"buyer_email": buyer.email if buyer else o.buyer_email,
+                                         "processing_fee_cents": o.processing_fee_cents})
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -100,14 +105,43 @@ def refund(order_id: uuid.UUID, body: RefundIn, actor: User = Depends(finance), 
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown refund reason") from None
     if reason is RefundReason.chargeback:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Chargebacks are recorded from provider events")
+    provider = get_provider()
+    if order.purpose is OrderPurpose.gallery:
+        from app.services.gallery_commerce import refund_gallery_order
+
+        try:
+            refund_gallery_order(db, provider, order, body.amount_cents, reason, body.note, actor.id)
+        except PaymentProviderError as exc:
+            db.rollback()
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Payment provider error: {exc}") from None
+        db.commit()
+        return order_out(db, order)
+    if order.purpose is OrderPurpose.milestone:
+        from app.services import production_service as prod
+
+        m = db.get(Milestone, order.milestone_id)
+        if order.status not in (OrderStatus.paid, OrderStatus.partially_refunded):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Nothing refundable on this order")
+        if m.status is MilestoneStatus.disputed:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Resolve the project dispute instead")
+        remaining = prod.held_cents(m) + prod.outstanding_release(m) + m.tax_cents - m.tax_refunded_cents
+        try:
+            prod.refund_milestone_amount(db, provider, m, m.project, body.amount_cents or remaining, reason,
+                                         body.note, actor.id)
+        except PaymentProviderError as exc:
+            db.rollback()
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Payment provider error: {exc}") from None
+        db.commit()
+        return order_out(db, order)
     wanted = set(body.line_ids)
     lines = [ln for ln in order.lines if ln.status is OrderLineStatus.fulfilled and (not wanted or ln.id in wanted)]
     if not lines:
         raise HTTPException(status.HTTP_409_CONFLICT, "Nothing refundable on this order")
-    provider = get_provider()
+    if body.amount_cents is not None and len(lines) != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A partial amount applies to exactly one line")
     try:
         for ln in lines:
-            ps.refund_line(db, provider, ln, reason, body.note, actor.id)
+            ps.refund_line(db, provider, ln, reason, body.note, actor.id, amount_cents=body.amount_cents)
             db.commit()  # one line at a time: each provider refund is matched by its own journal
     except PaymentProviderError as exc:
         db.rollback()
@@ -132,7 +166,7 @@ def list_payouts(_: User = Depends(finance), db: Session = Depends(get_db)):
 
 @router.post("/reconciliation/run")
 def run_reconciliation(actor: User = Depends(finance), db: Session = Depends(get_db)):
-    run = payout_service.reconcile(db, actor.id)
+    run = payout_service.reconcile(db, actor.id, provider=get_provider())
     db.commit()
     return _run_out(run)
 

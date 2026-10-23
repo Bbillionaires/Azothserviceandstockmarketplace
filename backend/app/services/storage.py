@@ -30,6 +30,12 @@ class Storage(Protocol):
     def private_download_url(self, key: str, filename: str, seconds: int) -> str | None: ...
     def open_private(self, key: str) -> Iterator[bytes]: ...
     def local_path(self, key: str, public: bool) -> Path | None: ...
+    def size(self, key: str, public: bool = False) -> int | None: ...
+    def read_head(self, key: str, length: int, public: bool = False) -> bytes: ...
+    def download_to(self, key: str, dest: Path, public: bool = False) -> None: ...
+    def copy(self, src: str, dest: str, public_dest: bool, content_type: str) -> None: ...
+    def delete(self, key: str, public: bool = False) -> None: ...
+    def presigned_upload_url(self, key: str, content_type: str, seconds: int) -> str | None: ...
 
 
 class LocalStorage:
@@ -69,6 +75,33 @@ class LocalStorage:
 
     def local_path(self, key: str, public: bool) -> Path | None:
         return self._path(key, public)
+
+    def size(self, key: str, public: bool = False) -> int | None:
+        path = self._path(key, public)
+        return path.stat().st_size if path.exists() else None
+
+    def read_head(self, key: str, length: int, public: bool = False) -> bytes:
+        with self._path(key, public).open("rb") as fh:
+            return fh.read(length)
+
+    def download_to(self, key: str, dest: Path, public: bool = False) -> None:
+        shutil.copyfile(self._path(key, public), dest)
+
+    def copy(self, src: str, dest: str, public_dest: bool, content_type: str) -> None:
+        target = self._path(dest, public_dest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self._path(src, public=False), target)
+
+    def delete(self, key: str, public: bool = False) -> None:
+        self._path(key, public).unlink(missing_ok=True)
+
+    def presigned_upload_url(self, key: str, content_type: str, seconds: int) -> str | None:
+        return None  # the API accepts the bytes itself (PUT /uploads/{id}/blob)
+
+    def write_stream_path(self, key: str) -> Path:
+        path = self._path(key, public=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 class S3Storage:
@@ -124,6 +157,33 @@ class S3Storage:
 
     def local_path(self, key: str, public: bool) -> Path | None:
         return None
+
+    def size(self, key: str, public: bool = False) -> int | None:
+        try:
+            return int(self.client.head_object(Bucket=self._bucket(public), Key=key)["ContentLength"])
+        except self.client.exceptions.ClientError:
+            return None
+
+    def read_head(self, key: str, length: int, public: bool = False) -> bytes:
+        obj = self.client.get_object(Bucket=self._bucket(public), Key=key, Range=f"bytes=0-{length - 1}")
+        return obj["Body"].read()
+
+    def download_to(self, key: str, dest: Path, public: bool = False) -> None:
+        self.client.download_file(self._bucket(public), key, str(dest))
+
+    def copy(self, src: str, dest: str, public_dest: bool, content_type: str) -> None:
+        self.client.copy({"Bucket": self.private_bucket, "Key": src}, self._bucket(public_dest), dest,
+                         ExtraArgs={"ContentType": content_type, "MetadataDirective": "REPLACE"})
+
+    def delete(self, key: str, public: bool = False) -> None:
+        self.client.delete_object(Bucket=self._bucket(public), Key=key)
+
+    def presigned_upload_url(self, key: str, content_type: str, seconds: int) -> str | None:
+        # Direct browser → bucket upload; the bucket needs a CORS rule allowing PUT from the web origin.
+        return self.client.generate_presigned_url(
+            "put_object", Params={"Bucket": self.private_bucket, "Key": key, "ContentType": content_type},
+            ExpiresIn=seconds,
+        )
 
 
 @lru_cache

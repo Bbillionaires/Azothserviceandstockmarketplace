@@ -63,9 +63,24 @@ is a configurable placeholder.
 * Messaging and notifications, and verified two-way reviews.
 * Private client proofing galleries.
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for status and known limitations.
-Nothing here is production-ready until the legal texts are reviewed, Stripe is
-verified in test mode, and the hardening items in the roadmap are complete.
+**Gap closure (hardening and money edge cases):**
+
+* A Redis-backed RQ worker for media, gallery and deliverable processing, and
+  Redis rate limits shared across API replicas.
+* Direct-to-storage uploads (presigned PUT) with upload sessions and progress.
+* Resend email, and Cloudflare Turnstile CAPTCHA on public forms.
+* Partial refunds, refunds issued in the Stripe dashboard, per-line Stripe
+  tax, and reconciliation against Stripe balance activity.
+* Bookings: referral commissions, refunds after release, chargebacks restored
+  when won, and automatic refunds of duplicate payments.
+* Creator-recruitment referral bonus, a multi-currency cart and earnings, and
+  payout tax-information status.
+* Gallery add-on sales: paid downloads and creator-fulfilled prints with guest
+  checkout and shipping tracking.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for status and remaining limitations.
+Nothing here is production-ready until the legal texts are reviewed and
+Stripe is verified in test mode.
 
 ## Quick start on Windows (PowerShell)
 
@@ -103,6 +118,16 @@ python -m app.cli demo                     # optional: 3 demo creators + 12 imag
 uvicorn app.main:app --reload --port 8000  # API docs: http://localhost:8000/docs
 ```
 
+Without `REDIS_URL`, uploads are processed inside the API process, which is
+fine for development. To run the production setup locally, start Redis
+(`docker run -p 6379:6379 redis:7`), set `REDIS_URL=redis://localhost:6379/0`
+and run a worker in another window. On Windows, RQ needs WSL or Docker because
+it relies on `fork`:
+
+```powershell
+rq worker default --url redis://localhost:6379/0 --with-scheduler
+```
+
 Verification and reset emails are printed in this terminal in development.
 Copy the link from there.
 
@@ -122,7 +147,7 @@ npm run dev                                # http://localhost:3000
 ```powershell
 cd backend
 .\.venv\Scripts\Activate.ps1
-pytest                 # royalties, rights, auth, media, admin, video, migrations, commerce, production
+pytest                 # royalties, rights, auth, media, admin, video, migrations, commerce, production, gaps
 ruff check .
 
 cd ..\frontend
@@ -135,7 +160,7 @@ macOS and Linux use the same commands with `source .venv/bin/activate` and
 
 ## Deploying
 
-Vercel (frontend) + Railway (API, PostgreSQL, ClamAV, daily finance cron) +
+Vercel (frontend) + Railway (API, worker, PostgreSQL, Redis, ClamAV, daily finance cron) +
 Cloudflare R2 (storage) + Stripe Connect (payments). Step by step in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Development rules

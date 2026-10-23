@@ -79,6 +79,10 @@ from app.models.production import (
     GalleryComment,
     GalleryItem,
     GalleryItemStatus,
+    GalleryOrder,
+    GalleryOrderItem,
+    GalleryOrderStatus,
+    GalleryPrintOption,
     GalleryStatus,
     Message,
     Milestone,
@@ -100,6 +104,7 @@ from app.models.production import (
     RightsType,
     ServicePackage,
 )
+from app.models.uploads import UploadPurpose, UploadSession, UploadStatus
 from app.models.user import (
     EmailToken,
     EmailTokenPurpose,

@@ -236,29 +236,37 @@ tests.
 | `fee_recovery` | revenue | Processing fees deducted from net revenue before the split |
 | `processing_fees` | expense | Fees charged by the provider |
 | `refund_losses` | expense | Dispute fees and other absorbed losses |
+| `client_funds_held` | liability | Milestone payments held until approval |
+| `referral_bonuses` | expense | Platform-funded creator-recruitment bonuses |
 
 ### Journals
 
 | Event | Entries |
 |---|---|
 | Sale | Dr clearing (total − fee), Dr processing_fees (fee); Cr tax_payable, Cr creator_payable, Cr affiliate_payable, Cr platform_revenue, Cr fee_recovery |
-| Refund (per line, full) | Exact mirror of the line's credits; Cr clearing (price + tax). The provider keeps its original fee, so the platform absorbs it |
+| Refund (per line, full or partial) | Reverses each credited account in proportion to what is still outstanding on it (the last refund reverses exactly the remainder); Cr clearing (amount). Allocation stored on the refund. The provider keeps its original fee, so the platform absorbs it |
 | Chargeback | Same reversal as a refund, plus Dr refund_losses / Cr clearing for the dispute fee; licenses are revoked |
 | Dispute won | Re-posts the line credits against clearing; licenses and earnings are restored (new hold period) |
+| Creator recruitment bonus | Dr referral_bonuses; Cr affiliate_payable (referrer) |
+| Gallery sale | Dr clearing (total − fee), Dr processing_fees; Cr tax_payable, Cr creator_payable, Cr platform_revenue |
 | Payout | Dr creator_payable / affiliate_payable; Cr clearing |
 | Failed or reversed transfer | Mirror of the payout journal; the earnings become available again |
 
 Every journal is checked for balance before insert and has a unique
-idempotency key (`sale:<order>`, `refund:<line>`, `payout:<id>`, ...).
+idempotency key (`sale:<order>`, `refund:<line>`, `refund:<line>:<n>` for
+later partial refunds, `payout:<id>`, ...).
 
 ### Earnings sub-ledger and holds
 
 Each sale creates `earnings` rows for the creator (and affiliate) with status
 `pending` until `EARNINGS_HOLD_DAYS` (default 14) pass, then `available`. The
 daily job pays available balances of at least `MIN_PAYOUT_CENTS` to payees
-whose Stripe Express account has payouts enabled. A refund before payout
-marks the earning `reversed`. A refund after payout adds a *negative* earning
-that nets against the next payout, so a payee's available balance can be
+whose Stripe Express account has payouts enabled. Original earnings are never
+edited: a refund or chargeback adds a *negative* adjustment row against the
+earning it reduces (newest outstanding earning first). Against an unpaid
+earning the adjustment keeps that earning's status and release date, so both
+release together; against a paid earning it is available at once and nets
+against the next payout (a clawback), so a payee's available balance can be
 negative. Reconciliation verifies that every payable ledger account equals the
 unpaid earnings for that payee.
 
@@ -269,30 +277,61 @@ non-pending order has a sale journal and correct totals; every fulfilled line
 has an active license and a royalty allocation; no payouts stuck in
 `processing` for over an hour; no unprocessed provider events. It also
 reports the clearing balance so finance can compare it with the Stripe
-balance. A non-`ok` run exits non-zero for cron alerting.
+balance. With a provider configured it also compares the provider's balance
+activity for the last 7 days (`provider_matches`): every charge against a paid
+order (amount and fee), refund totals per payment, and transfers against sent
+payouts, in both directions (activity under 10 minutes old is skipped while
+webhooks are in flight). A non-`ok` run exits non-zero for cron alerting.
+
+### Partial refunds and provider-side refunds
+
+* Finance can refund any amount (price + tax) of a line, several times, from
+  Admin → Finance. The license is revoked only when the line is fully refunded.
+* A refund issued in the Stripe dashboard arrives as `charge.refunded`. The
+  newly refunded amount (provider total minus what is already recorded) is
+  spread across the order's refundable lines in proportion to what each can
+  still refund, and booked like any other refund.
+
+### Tax per line
+
+With Stripe Tax on, the Checkout line items' tax amounts are recorded per line.
+Proration by price is used only if the provider's line amounts don't add up.
+
+### Referral program
+
+* **Customer acquisition:** `affiliate_bps_of_platform` of the platform share on
+  sales (and, from `services_commission` v2, of the commission on bookings)
+  for buyers referred within the attribution window.
+* **Creator recruitment bonus:** a one-time `REFERRAL_CREATOR_BONUS_CENTS`
+  (default 25.00) paid by the platform when a referred creator's first positive
+  earning clears its hold within the attribution window. Flagged or rejected
+  referrals never qualify. It is an expense of the platform, never taken from
+  creator money.
+
+### Multi-currency
+
+Prices may be listed in any supported currency. A cart with several currencies
+checks out once per currency; earnings, balances and payouts are kept per
+currency, and the dashboard has a currency selector.
 
 ### Known limitations
 
-* Refunds are whole-line only. A partial refund issued in the Stripe dashboard
-  is stored and flagged for manual review rather than guessed at.
-* Tax is allocated to lines in proportion to their prices (Stripe Tax returns
-  an order total).
-* Checkout sessions are single-currency; multi-currency pricing is Phase 5.
-* Provider-side reconciliation (matching Stripe balance transactions line by
-  line) is manual for now: compare the reported clearing balance with the
-  Stripe dashboard.
-* Affiliate commissions cover customer acquisition only. Creator-recruitment
-  bonuses are not built yet.
+* Not yet verified against live Stripe test mode end to end (see DEPLOYMENT.md §6).
+* Currency conversion is not offered: each payout goes out in the earning's
+  currency, and Stripe converts to the payee's bank currency if needed.
 
 ## 8. Custom production money flow (Phase 3)
 
 | Event | Journal (`kind`) | Entries |
 |---|---|---|
 | Client funds a milestone | `service_funding` | Dr clearing (total − fee), Dr processing_fees; Cr tax_payable, Cr **client_funds_held** (amount) |
-| Client approves (or auto-approval) | `service_release` | Dr client_funds_held; Cr creator_payable (creator share), Cr platform_revenue (commission) |
+| Client approves (or auto-approval) | `service_release` | Dr client_funds_held (what is still held); Cr creator_payable (creator share), Cr affiliate_payable (client's referrer, out of the commission), Cr platform_revenue (rest) |
 | Creator refunds / dispute refund | `service_refund` | Dr client_funds_held, Dr tax_payable (pro rata); Cr clearing |
 | Dispute split | release + refund | Creator part released, remainder refunded |
-| Card chargeback | `dispute` | Held funds (or released shares and earnings) reversed against clearing |
+| Refund after release (finance or Stripe dashboard) | `service_refund` | Dr creator_payable, affiliate_payable, platform_revenue in proportion to what each still holds, Dr tax_payable; Cr clearing. Earnings get negative adjustments (clawbacks if already paid) |
+| Card chargeback | `dispute` | Everything still held or released reversed against clearing; a snapshot is stored |
+| Chargeback won | `dispute_reinstated` | Exact mirror of the chargeback; held funds held again, released shares restored as new pending earnings |
+| Duplicate milestone payment | `service_funding` + `service_refund` | Booked into client_funds_held and refunded in full immediately (the provider keeps its fee) |
 
 * **Commission** comes from the versioned `services_commission` rule (seeded at
   85% creator / 15% platform, a placeholder business decision). Each project
@@ -305,8 +344,26 @@ balance. A non-`ok` run exits non-zero for cron alerting.
 * Reconciliation adds a check that the `client_funds_held` balance equals the
   amount currently held across funded, submitted, revision-requested and
   disputed milestones.
-* **Not automated (flagged for finance review):** a duplicate payment for an
-  already-funded milestone, a provider-side refund on a milestone payment, and
-  a chargeback that the platform later wins. These are stored as failed
-  payment events and appear in Admin → Finance.
-* Referral commissions do not apply to bookings yet.
+* A refund of a milestone payment (from Admin → Finance or the Stripe
+  dashboard) comes out of held funds first, then out of released funds.
+* The client's referrer earns booking commissions when the project's rule has
+  `affiliate_bps_of_platform` > 0. Installs still on the original Phase 3 rule
+  get `services_commission` v2 (10% of the commission) when the seed runs;
+  existing projects keep their snapshotted rule.
+
+## 9. Client gallery sales
+
+Creators can sell full-resolution downloads (one price per gallery) and prints
+(their own print options, fulfilled and shipped by the creator) from a client
+gallery. The client pays without an account; the order stores their name,
+email and shipping address.
+
+* Commission: the latest `services_commission` version, snapshotted on each
+  gallery order. The platform pays processing fees from its commission.
+* Purchased downloads unlock for that gallery item. A full refund or a
+  chargeback locks them again; a won dispute unlocks them.
+* Refunds (full or partial, Admin → Finance or the Stripe dashboard) reverse
+  the creator payable, platform revenue and tax in proportion to what remains.
+* The creator records carrier and tracking number; the client is emailed.
+* No print-lab integration: print quality, shipping and returns are the
+  creator's responsibility, which the gallery shows to the client.

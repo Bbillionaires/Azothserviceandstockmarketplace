@@ -4,25 +4,33 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Alert } from "@/components/Alert";
-import { api, label } from "@/lib/api";
-import type { Gallery } from "@/lib/gallery";
+import { api, label, money } from "@/lib/api";
+import type { Gallery, GalleryOrder } from "@/lib/gallery";
+import { uploadFile } from "@/lib/upload";
 
 export default function ManageGallery() {
   const { id } = useParams<{ id: string }>();
   const [g, setG] = useState<Gallery | null>(null);
-  const [form, setForm] = useState({ title: "", message: "", client_name: "", client_email: "", password: "", clear_password: false, expires_at: "", allow_downloads: false, selection_limit: "" });
+  const [form, setForm] = useState({ title: "", message: "", client_name: "", client_email: "", password: "", clear_password: false, expires_at: "", allow_downloads: false, selection_limit: "", download_price: "", currency: "USD" });
+  const [orders, setOrders] = useState<GalleryOrder[]>([]);
+  const [printForm, setPrintForm] = useState({ name: "", price: "" });
   const [uploading, setUploading] = useState(0);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
-    const data = await api<Gallery>(`/galleries/${id}`);
+    const [data, sales] = await Promise.all([
+      api<Gallery>(`/galleries/${id}`),
+      api<GalleryOrder[]>(`/galleries/${id}/orders`).catch(() => []),
+    ]);
     setG(data);
+    setOrders(sales);
     return data;
   }, [id]);
 
   useEffect(() => {
     load().then((d) => setForm({ title: d.title, message: d.message, client_name: d.client_name, client_email: d.client_email ?? "", password: "", clear_password: false,
-      expires_at: d.expires_at ? d.expires_at.slice(0, 10) : "", allow_downloads: d.allow_downloads, selection_limit: d.selection_limit ? String(d.selection_limit) : "" }))
+      expires_at: d.expires_at ? d.expires_at.slice(0, 10) : "", allow_downloads: d.allow_downloads, selection_limit: d.selection_limit ? String(d.selection_limit) : "",
+      download_price: d.download_price_cents ? (d.download_price_cents / 100).toFixed(2) : "", currency: d.currency }))
       .catch((e) => setMsg({ ok: false, text: e.message }));
   }, [load]);
 
@@ -36,19 +44,38 @@ export default function ManageGallery() {
     try { await fn(); setMsg({ ok: true, text: ok }); await load(); } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
   };
 
-  const save = () => act(() => api(`/galleries/${id}`, { method: "PUT", json: {
-    ...form, client_email: form.client_email || null, password: form.password || null, expires_at: form.expires_at || null,
-    selection_limit: form.selection_limit ? Number(form.selection_limit) : null,
-  } }), "Settings saved");
+  const save = () => {
+    const { download_price, ...rest } = form;
+    return act(() => api(`/galleries/${id}`, { method: "PUT", json: {
+      ...rest, client_email: form.client_email || null, password: form.password || null, expires_at: form.expires_at || null,
+      selection_limit: form.selection_limit ? Number(form.selection_limit) : null,
+      download_price_cents: download_price ? Math.round(Number(download_price) * 100) : null,
+    } }), "Settings saved");
+  };
+
+  const addPrint = () => act(async () => {
+    await api(`/galleries/${id}/print-options`, { method: "POST", json: { name: printForm.name, price_cents: Math.round(Number(printForm.price) * 100) } });
+    setPrintForm({ name: "", price: "" });
+  }, "Print option added");
+
+  const ship = (o: GalleryOrder) => {
+    const carrier = prompt("Carrier (e.g. UPS, USPS)");
+    if (!carrier) return;
+    const tracking = prompt("Tracking number");
+    if (!tracking) return;
+    act(() => api(`/galleries/${id}/orders/${o.id}/ship`, { method: "POST", json: { carrier, tracking_number: tracking } }), "Marked shipped; the client was emailed");
+  };
 
   const upload = async (files: FileList | null) => {
     if (!files) return;
     setUploading(files.length);
     for (const file of Array.from(files)) {
-      const data = new FormData();
-      data.set("file", file);
-      const res = await fetch(`/api/v1/galleries/${id}/items`, { method: "POST", body: data, credentials: "include", headers: { "X-Requested-With": "fetch" } });
-      if (!res.ok) setMsg({ ok: false, text: `${file.name}: ${(await res.json().catch(() => ({}))).detail ?? "upload failed"}` });
+      try {
+        const uploadId = await uploadFile(file, "gallery_item", id);
+        await api(`/galleries/${id}/items/from-upload`, { method: "POST", json: { upload_id: uploadId } });
+      } catch (e) {
+        setMsg({ ok: false, text: `${file.name}: ${(e as Error).message}` });
+      }
       setUploading((n) => n - 1);
     }
     await load();
@@ -116,8 +143,49 @@ export default function ManageGallery() {
             <div><label htmlFor="gx" className="label">Link expires</label><input id="gx" type="date" className="input" value={form.expires_at} onChange={(e) => setForm({ ...form, expires_at: e.target.value })} /></div>
             <div><label htmlFor="gl" className="label">Selection limit</label><input id="gl" type="number" min="1" className="input" value={form.selection_limit} onChange={(e) => setForm({ ...form, selection_limit: e.target.value })} /></div>
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.allow_downloads} onChange={(e) => setForm({ ...form, allow_downloads: e.target.checked })} /> Allow original downloads</label>
+            <fieldset className="space-y-2 rounded-lg border border-ink-700 p-3">
+              <legend className="px-1 text-sm text-gold-300">Sell downloads</legend>
+              <div className="flex gap-2">
+                <div className="flex-1"><label htmlFor="gdp" className="label">Price per download</label><input id="gdp" type="number" min="1" step="0.01" className="input" placeholder="Not for sale" value={form.download_price} onChange={(e) => setForm({ ...form, download_price: e.target.value })} /></div>
+                <div className="w-24"><label htmlFor="gcur" className="label">Currency</label><input id="gcur" className="input uppercase" maxLength={3} value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value.toUpperCase() })} /></div>
+              </div>
+              <p className="text-xs text-ink-400">Ignored while original downloads are free. The platform commission applies to sales.</p>
+            </fieldset>
             <button className="btn-gold w-full" onClick={save}>Save settings</button>
           </div>
+          <div className="card space-y-3 p-5">
+            <h2 className="font-display text-lg">Print options</h2>
+            <p className="text-xs text-ink-400">You print and ship these yourself; orders appear below with the client&apos;s address.</p>
+            <ul className="space-y-1 text-sm">
+              {g.print_options.map((o) => (
+                <li key={o.id} className="flex items-center justify-between">
+                  <span>{o.name} · {money(o.price_cents, g.currency)}</span>
+                  <button className="text-xs text-ink-400 hover:text-red-300" onClick={() => act(() => api(`/galleries/${id}/print-options/${o.id}`, { method: "DELETE" }), "Print option removed")}>Remove</button>
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
+              <input aria-label="Print name" className="input flex-1" placeholder="8×10 lustre print" value={printForm.name} onChange={(e) => setPrintForm({ ...printForm, name: e.target.value })} />
+              <input aria-label="Print price" type="number" min="1" step="0.01" className="input w-24" placeholder="Price" value={printForm.price} onChange={(e) => setPrintForm({ ...printForm, price: e.target.value })} />
+            </div>
+            <button className="btn-ghost w-full text-sm" disabled={printForm.name.trim().length < 2 || !printForm.price} onClick={addPrint}>Add print option</button>
+          </div>
+          {orders.length > 0 && (
+            <div className="card space-y-3 p-5 text-sm">
+              <h2 className="font-display text-lg">Orders</h2>
+              {orders.map((o) => (
+                <div key={o.id} className="space-y-1 border-t border-ink-700 pt-2 first:border-0 first:pt-0">
+                  <p className="flex justify-between"><span>{o.client_name}</span><span>{money(o.total_cents, o.currency)}</span></p>
+                  <p className="text-xs text-ink-400">{label(o.status)} · {new Date(o.created_at).toLocaleDateString()}{o.tracking_number ? ` · ${o.carrier} ${o.tracking_number}` : ""}</p>
+                  <ul className="text-xs text-ink-300">{o.items.map((l, i) => <li key={i}>{l.quantity > 1 ? `${l.quantity} × ` : ""}{l.description}</li>)}</ul>
+                  {o.shipping_address && <p className="text-xs text-ink-400">Ship to: {[o.shipping_address.name, o.shipping_address.line1, o.shipping_address.line2, o.shipping_address.city, o.shipping_address.region, o.shipping_address.postal_code, o.shipping_address.country].filter(Boolean).join(", ")}</p>}
+                  {o.items.some((l) => l.kind === "print") && ["paid", "partially_refunded"].includes(o.status) && (
+                    <button className="btn-ghost text-xs" onClick={() => ship(o)}>Mark shipped</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {commentsFor(null).length > 0 && (
             <div className="card space-y-2 p-5 text-sm">
               <h2 className="font-display text-lg">General comments</h2>

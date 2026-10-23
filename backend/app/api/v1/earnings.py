@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.core.deps import current_user, verified_user
 from app.models import (
     Earning,
+    EarningKind,
     EarningStatus,
     LicenseType,
     MediaAsset,
@@ -41,12 +42,24 @@ from app.services.referral_service import get_or_create_code
 router = APIRouter(tags=["earnings"])
 
 
+TAX_REQUIREMENT_HINTS = ("tax_id", "id_number", "ssn_last_4", "tax")
+
+
+def tax_info_status(acct: PayoutAccount) -> str:
+    """Tax information (W-9/W-8 data) is collected by Stripe during onboarding."""
+    if any(any(h in req for h in TAX_REQUIREMENT_HINTS) for req in (acct.requirements_due or [])):
+        return "required"
+    if acct.details_submitted and acct.payouts_enabled:
+        return "provided"
+    return "pending"
+
+
 def _account_out(acct: PayoutAccount | None) -> dict | None:
     if not acct:
         return None
     return {"status": acct.status.value, "payouts_enabled": acct.payouts_enabled,
             "details_submitted": acct.details_submitted, "requirements_due": acct.requirements_due,
-            "country": acct.country}
+            "country": acct.country, "tax_info_status": tax_info_status(acct)}
 
 
 @router.get("/earnings/summary", response_model=EarningsSummary)
@@ -57,7 +70,9 @@ def summary(currency: str = Query("USD", min_length=3, max_length=3), user: User
     next_release = db.scalar(select(func.min(Earning.available_at)).where(
         Earning.payee_user_id == user.id, Earning.status == EarningStatus.pending))
     acct = db.scalar(select(PayoutAccount).where(PayoutAccount.user_id == user.id))
-    return EarningsSummary(currency=currency.upper(), pending_cents=b["pending"], available_cents=b["available"],
+    currencies = sorted(set(db.scalars(select(Earning.currency).where(Earning.payee_user_id == user.id))) | {"USD"})
+    return EarningsSummary(currency=currency.upper(), currencies=currencies, pending_cents=b["pending"],
+                           available_cents=b["available"],
                            paid_cents=b["paid"], lifetime_cents=b["lifetime"], by_kind=b["by_kind"],
                            next_release_at=next_release, hold_days=settings.earnings_hold_days,
                            min_payout_cents=settings.min_payout_cents, payout_account=_account_out(acct))
@@ -84,14 +99,26 @@ def _earning_rows(db: Session, user: User, month: str | None, page: int, page_si
                                           db.get(LicenseType, line.license_type_id).name, line.unit_price_cents)
             rule, explanation = (f"{alloc.rule_code} v{alloc.rule_version}" if alloc else ""), (alloc.explanation
                                                                                             if alloc else [])
+        elif e.kind is EarningKind.referral_bonus:
+            title, license_name, gross, rule = "Creator recruitment bonus", "Referral program", 0, "referral bonus"
+            explanation = [f"One-time bonus: {e.amount_cents / 100:,.2f} {e.currency}, paid by the platform"]
+        elif e.kind is EarningKind.gallery_sale:
+            from app.services.gallery_commerce import gallery_earning_view
+
+            title, license_name, gross, rule, explanation = gallery_earning_view(db, e)
         else:
             m = db.get(Milestone, e.milestone_id)
             project = m.project
             rule_row = db.get(RevenueShareRule, project.commission_rule_id)
             title, license_name, gross = f"{project.title}: {m.title}", "Custom production", m.released_cents
             rule = f"{rule_row.code} v{rule_row.version}"
-            explanation = [f"Milestone released: {m.released_cents / 100:,.2f} {e.currency}",
-                           f"Creator share ({rule_row.creator_bps / 100:g}%): {abs(e.amount_cents) / 100:,.2f}",
+            if e.kind is EarningKind.affiliate_commission:
+                license_name = "Referral commission (booking)"
+                share = (f"Referral commission ({rule_row.affiliate_bps_of_platform / 100:g}% of the platform "
+                         f"commission): {abs(e.amount_cents) / 100:,.2f}")
+            else:
+                share = f"Creator share ({rule_row.creator_bps / 100:g}%): {abs(e.amount_cents) / 100:,.2f}"
+            explanation = [f"Milestone released: {m.released_cents / 100:,.2f} {e.currency}", share,
                            f"Rule: {rule}"]
         out.append({
             "id": e.id, "kind": e.kind.value, "status": e.status.value, "amount_cents": e.amount_cents,

@@ -34,6 +34,7 @@ from app.schemas.auth import (
 )
 from app.schemas.common import Message
 from app.services import audit, email
+from app.services.captcha import require_captcha
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -100,6 +101,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
 @router.post("/register", response_model=UserOut, status_code=201)
 def register(body: RegisterIn, request: Request, response: Response, db: Session = Depends(get_db)):
     limiter.check(f"register:{client_ip(request)}", 5)
+    require_captcha(body.captcha_token, client_ip(request))
     email_norm = body.email.lower()
     if db.scalar(select(User.id).where(User.email == email_norm)):
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists")
@@ -200,6 +202,7 @@ def resend_verification(user: User = Depends(current_user), db: Session = Depend
 @router.post("/password-reset/request", response_model=Message)
 def password_reset_request(body: EmailIn, request: Request, db: Session = Depends(get_db)):
     limiter.check(f"reset:{client_ip(request)}", 5)
+    require_captcha(body.captcha_token, client_ip(request))
     user = db.scalar(select(User).where(User.email == body.email.lower()))
     if user and user.status == UserStatus.active:
         settings = get_settings()

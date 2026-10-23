@@ -5,9 +5,13 @@ Milestone money flow (integer cents):
     Funding   Dr clearing (total − fee), Dr processing_fees (fee)
               Cr tax_payable (tax), Cr client_funds_held (amount)
     Release   Dr client_funds_held (amount)
-              Cr creator_payable (amount × creator share), Cr platform_revenue (commission)
+              Cr creator_payable (amount × creator share), Cr affiliate_payable (the
+              client's referrer, out of the commission), Cr platform_revenue (rest)
     Refund    Dr client_funds_held (amount), Dr tax_payable (tax)
               Cr clearing (amount + tax)
+
+    Refund after release: each party (creator, referrer, platform) gives back
+              its outstanding share in proportion; paid earnings become clawbacks.
 
 Funds stay in the payment provider's balance while held. This is a marketplace
 payment workflow, not an escrow service. The commission comes from the
@@ -33,6 +37,7 @@ from app.models import (
     EarningKind,
     EarningStatus,
     JournalKind,
+    LedgerJournal,
     Milestone,
     MilestoneStatus,
     Order,
@@ -60,7 +65,7 @@ from app.models.production import ConversationKind
 from app.services import audit, ledger, messaging
 from app.services import royalty_engine as engine
 from app.services.notify import notify
-from app.services.payment_service import share_rule
+from app.services.payment_service import active_affiliate, share_rule
 from app.services.payments import CheckoutItem, PaymentDetails, PaymentProvider
 
 log = logging.getLogger("production")
@@ -384,7 +389,8 @@ def start_funding(db: Session, provider: PaymentProvider, milestone: Milestone, 
     attempt = db.scalar(select(func.count(Order.id)).where(Order.milestone_id == milestone.id)) or 0
     order = Order(buyer_user_id=client.id, currency=project.currency, subtotal_cents=milestone.amount_cents,
                   tax_cents=0, total_cents=milestone.amount_cents, idempotency_key=f"milestone:{milestone.id}:{attempt}",
-                  provider=provider.name, purpose=OrderPurpose.milestone, milestone_id=milestone.id, lines=[])
+                  provider=provider.name, purpose=OrderPurpose.milestone, milestone_id=milestone.id, lines=[],
+                  affiliate_user_id=active_affiliate(db, client))
     db.add(order)
     db.flush()
     web = get_settings().public_web_url
@@ -400,7 +406,8 @@ def start_funding(db: Session, provider: PaymentProvider, milestone: Milestone, 
     return order
 
 
-def fund_from_payment(db: Session, order: Order, payment: PaymentDetails) -> None:
+def fund_from_payment(db: Session, order: Order, payment: PaymentDetails,
+                      provider: PaymentProvider | None = None) -> None:
     """Webhook: the client's milestone payment succeeded. Idempotent."""
     if order.status is not OrderStatus.pending or not payment.paid:
         return
@@ -408,13 +415,12 @@ def fund_from_payment(db: Session, order: Order, payment: PaymentDetails) -> Non
     if payment.currency.upper() != order.currency or payment.amount_total_cents != expected:
         raise ValueError(f"payment mismatch for milestone order {order.id}")
     m = db.get(Milestone, order.milestone_id)
-    if m.status is not MilestoneStatus.unfunded:
-        # Paid twice (e.g. two open checkout tabs). Surfaced to finance as a failed
-        # event; refund the duplicate payment in the provider dashboard.
-        raise ValueError(f"milestone {m.id} is already funded; refund duplicate order {order.id}")
     order.status, order.paid_at = OrderStatus.paid, now()
     order.tax_cents, order.total_cents = payment.amount_tax_cents, payment.amount_total_cents
     order.processing_fee_cents, order.provider_payment_id = payment.fee_cents, payment.payment_id
+    if m.status is not MilestoneStatus.unfunded:
+        _refund_duplicate(db, provider, order, m)
+        return
     ledger.post(db, JournalKind.service_funding, f"milestone-funding:{order.id}", "order", order.id,
                 f"Milestone funded {m.id}", order.currency, [
                     ledger.dr(f"clearing:{order.provider}", order.total_cents - order.processing_fee_cents),
@@ -423,10 +429,41 @@ def fund_from_payment(db: Session, order: Order, payment: PaymentDetails) -> Non
                     ledger.cr("client_funds_held", m.amount_cents, f"milestone {m.id}"),
                 ])
     m.status, m.funded_at, m.tax_cents = MilestoneStatus.funded, now(), order.tax_cents
+    m.affiliate_user_id = order.affiliate_user_id
     project = m.project
     notify(db, _creator_user(db, project), "milestone_funded", f"Milestone funded: {m.title}",
            "Funds are held until the client approves your delivery.", f"/projects/{project.id}", send_email=True)
     audit.record(db, "production.milestone_funded", order.buyer_user_id, "milestone", m.id, order=order.id)
+
+
+def _refund_duplicate(db: Session, provider: PaymentProvider | None, order: Order, m: Milestone) -> None:
+    """The milestone was paid twice (e.g. two open checkout tabs): book the
+    receipt and refund it in full straight away. The provider keeps its fee."""
+    if provider is None:
+        raise ValueError(f"milestone {m.id} is already funded; refund duplicate order {order.id}")
+    memo = f"duplicate payment for milestone {m.id}"
+    ledger.post(db, JournalKind.service_funding, f"milestone-funding:{order.id}", "order", order.id, memo,
+                order.currency, [
+                    ledger.dr(f"clearing:{order.provider}", order.total_cents - order.processing_fee_cents),
+                    ledger.dr("processing_fees", order.processing_fee_cents),
+                    ledger.cr("client_funds_held", order.total_cents, memo),
+                ])
+    key = f"duplicate-refund:{order.id}"
+    refund_id = provider.refund(payment_id=order.provider_payment_id, amount_cents=order.total_cents,
+                                idempotency_key=key, metadata={"order_id": str(order.id), "milestone_id": str(m.id)})
+    journal = ledger.post(db, JournalKind.service_refund, key, "order", order.id, memo, order.currency, [
+        ledger.dr("client_funds_held", order.total_cents, memo),
+        ledger.cr(f"clearing:{order.provider}", order.total_cents, memo),
+    ])
+    db.add(Refund(order_id=order.id, order_line_id=None, milestone_id=m.id, amount_cents=order.total_cents,
+                  currency=order.currency, reason=RefundReason.duplicate, note="Automatic refund of a duplicate payment",
+                  provider_refund_id=refund_id, journal_id=journal.id))
+    order.status = OrderStatus.refunded
+    notify(db, order.buyer_user_id, "duplicate_payment_refunded", f"Duplicate payment refunded: {m.title}",
+           "This milestone was already funded, so your second payment has been refunded in full.",
+           f"/projects/{m.project_id}", send_email=True)
+    audit.record(db, "production.duplicate_payment_refunded", None, "order", order.id, milestone=m.id,
+                 amount=order.total_cents)
 
 
 def submit_milestone(db: Session, m: Milestone, project: Project, note: str) -> None:
@@ -461,59 +498,190 @@ def request_revision(db: Session, m: Milestone, project: Project, user: User, no
            f"/projects/{project.id}", send_email=True)
 
 
+def held_cents(m: Milestone) -> int:
+    return m.amount_cents - m.released_cents - m.refunded_cents
+
+
+def outstanding_release(m: Milestone) -> int:
+    return m.release_creator_cents + m.release_affiliate_cents + m.release_platform_cents
+
+
+def _paid_order(db: Session, m: Milestone) -> Order:
+    return db.scalar(select(Order).where(Order.milestone_id == m.id, Order.status.in_(
+        [OrderStatus.paid, OrderStatus.partially_refunded, OrderStatus.disputed])).order_by(Order.paid_at))
+
+
 def release(db: Session, m: Milestone, project: Project, amount: int, actor_id=None, reason: str = "approved") -> None:
-    """Move ``amount`` of a held milestone to the creator (less commission)."""
+    """Move ``amount`` of a held milestone to the creator, the client's referrer
+    (if any, out of the platform commission) and the platform."""
     if amount <= 0:
         return
     rule = db.get(RevenueShareRule, project.commission_rule_id)
+    aff = m.affiliate_user_id
     result = engine.calculate(engine.RoyaltyInput(gross_cents=amount, rule=share_rule(rule),
-                                                  creator_party_id="creator", currency=project.currency))
+                                                  creator_party_id="creator", currency=project.currency,
+                                                  affiliate_party_id=str(aff) if aff else None))
     creator_user = _creator_user(db, project)
+    memo = f"milestone {m.id}"
+    entries = [ledger.dr("client_funds_held", amount, memo),
+               ledger.cr(ledger.creator_payable(creator_user), result.creator_pool_cents, memo, creator_user)]
+    if result.affiliate_cents:
+        entries.append(ledger.cr(ledger.affiliate_payable(aff), result.affiliate_cents, memo, aff))
+    entries.append(ledger.cr("platform_revenue", result.platform_net_cents, memo))
     journal = ledger.post(db, JournalKind.service_release, f"milestone-release:{m.id}", "milestone", m.id,
-                          f"Milestone released ({reason})", project.currency, [
-                              ledger.dr("client_funds_held", amount, f"milestone {m.id}"),
-                              ledger.cr(ledger.creator_payable(creator_user), result.creator_pool_cents,
-                                        f"milestone {m.id}", creator_user),
-                              ledger.cr("platform_revenue", result.platform_net_cents, f"milestone {m.id}"),
-                          ], created_by=actor_id)
-    if result.creator_pool_cents:
-        db.add(Earning(payee_user_id=creator_user, kind=EarningKind.service_milestone, milestone_id=m.id,
-                       amount_cents=result.creator_pool_cents, currency=project.currency,
-                       status=EarningStatus.pending,
-                       available_at=now() + timedelta(days=get_settings().earnings_hold_days), journal_id=journal.id))
+                          f"Milestone released ({reason})", project.currency, entries, created_by=actor_id)
+    available_at = now() + timedelta(days=get_settings().earnings_hold_days)
+    for payee, kind, cents in ((creator_user, EarningKind.service_milestone, result.creator_pool_cents),
+                               (aff, EarningKind.affiliate_commission, result.affiliate_cents)):
+        if cents:
+            db.add(Earning(payee_user_id=payee, kind=kind, milestone_id=m.id, amount_cents=cents,
+                           currency=project.currency, status=EarningStatus.pending, available_at=available_at,
+                           journal_id=journal.id))
     m.released_cents += amount
+    m.release_creator_cents += result.creator_pool_cents
+    m.release_affiliate_cents += result.affiliate_cents
+    m.release_platform_cents += result.platform_net_cents
+
+
+def _refund_seq_key(db: Session, m: Milestone) -> str:
+    seq = db.scalar(select(func.count(Refund.id)).where(Refund.milestone_id == m.id,
+                                                        Refund.reason != RefundReason.duplicate)) or 0
+    return f"milestone-refund:{m.id}" if seq == 0 else f"milestone-refund:{m.id}:{seq}"
+
+
+def _tax_for(m: Milestone, pre_tax: int, final: bool) -> int:
+    remaining = m.tax_cents - m.tax_refunded_cents
+    if final:
+        return remaining
+    return min(remaining, (m.tax_cents * pre_tax) // m.amount_cents if m.amount_cents else 0)
+
+
+def _record_refund(db: Session, provider: PaymentProvider | None, m: Milestone, order: Order, key: str,
+                   entries: list, total: int, reason: RefundReason, note: str, actor_id) -> Refund:
+    refund_id = None
+    if provider is not None:
+        refund_id = provider.refund(payment_id=order.provider_payment_id, amount_cents=total, idempotency_key=key,
+                                    metadata={"milestone_id": str(m.id), "order_id": str(order.id)})
+    journal = ledger.post(db, JournalKind.service_refund, key, "milestone", m.id,
+                          f"Milestone refund ({reason.value})", order.currency, entries, created_by=actor_id)
+    refund = Refund(order_id=order.id, order_line_id=None, milestone_id=m.id, amount_cents=total,
+                    currency=order.currency, reason=reason, note=note, provider_refund_id=refund_id,
+                    journal_id=journal.id, initiated_by=actor_id)
+    db.add(refund)
+    fully = held_cents(m) == 0 and outstanding_release(m) == 0 and m.tax_refunded_cents >= m.tax_cents
+    if order.status is not OrderStatus.disputed:
+        order.status = OrderStatus.refunded if fully else OrderStatus.partially_refunded
+    return refund
 
 
 def refund_held(db: Session, provider: PaymentProvider | None, m: Milestone, project: Project, amount: int,
-                reason: RefundReason, note: str, actor_id=None) -> None:
+                reason: RefundReason, note: str, actor_id=None, tax: int | None = None) -> None:
     """Return ``amount`` of a held milestone (plus its share of tax) to the client."""
     if amount <= 0:
         return
-    order = db.scalar(select(Order).where(Order.milestone_id == m.id, Order.status.in_(
-        [OrderStatus.paid, OrderStatus.partially_refunded])))
-    tax = (m.tax_cents * amount) // m.amount_cents if m.amount_cents else 0
-    refund_id = None
-    if provider is not None:
-        refund_id = provider.refund(payment_id=order.provider_payment_id, amount_cents=amount + tax,
-                                    idempotency_key=f"milestone-refund:{m.id}",
-                                    metadata={"milestone_id": str(m.id), "order_id": str(order.id)})
-    journal = ledger.post(db, JournalKind.service_refund, f"milestone-refund:{m.id}", "milestone", m.id,
-                          f"Milestone refund ({reason.value})", project.currency, [
-                              ledger.dr("client_funds_held", amount, f"milestone {m.id}"),
-                              ledger.dr("tax_payable", tax, f"milestone {m.id}"),
-                              ledger.cr(f"clearing:{order.provider}", amount + tax, f"milestone {m.id}"),
-                          ], created_by=actor_id)
-    db.add(Refund(order_id=order.id, order_line_id=None, milestone_id=m.id, amount_cents=amount + tax,
-                  currency=project.currency, reason=reason, note=note, provider_refund_id=refund_id,
-                  journal_id=journal.id, initiated_by=actor_id))
-    order.status = OrderStatus.refunded if amount == m.amount_cents else OrderStatus.partially_refunded
+    held = held_cents(m)
+    if amount > held:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Refund exceeds the funds held for this milestone")
+    order = _paid_order(db, m)
+    if tax is None:
+        tax = _tax_for(m, amount, final=amount == held and m.released_cents == 0)
+    memo = f"milestone {m.id}"
     m.refunded_cents += amount
+    m.tax_refunded_cents += tax
+    _record_refund(db, provider, m, order, _refund_seq_key(db, m), [
+        ledger.dr("client_funds_held", amount, memo),
+        ledger.dr("tax_payable", tax, memo),
+        ledger.cr(f"clearing:{order.provider}", amount + tax, memo),
+    ], amount + tax, reason, note, actor_id)
+
+
+def _reverse_release(m: Milestone, amount: int, creator_user: uuid.UUID) -> dict[str, int]:
+    """Split ``amount`` of released money back over the parties that still hold it."""
+    from app.services.payment_service import prorate
+
+    parts = [(ledger.creator_payable(creator_user), "release_creator_cents"),
+             (ledger.affiliate_payable(m.affiliate_user_id) if m.affiliate_user_id else "", "release_affiliate_cents"),
+             ("platform_revenue", "release_platform_cents")]
+    outstanding = [getattr(m, attr) for _, attr in parts]
+    shares = outstanding if amount == sum(outstanding) else prorate(amount, outstanding)
+    out: dict[str, int] = {}
+    for (code, attr), share in zip(parts, shares, strict=True):
+        if share:
+            out[code] = share
+            setattr(m, attr, getattr(m, attr) - share)
+    m.reversed_release_cents += amount
+    return out
+
+
+def refund_released(db: Session, provider: PaymentProvider | None, m: Milestone, project: Project, amount: int,
+                    reason: RefundReason, note: str, actor_id=None, tax: int | None = None) -> None:
+    """Refund money that was already released (e.g. a goodwill refund after
+    approval). The creator, referrer and platform each give back their share;
+    paid-out earnings become clawbacks against future payouts."""
+    from app.services.payment_service import adjust_earnings, spread_over_earnings
+
+    if amount <= 0:
+        return
+    if amount > outstanding_release(m):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Refund exceeds the released amount still outstanding")
+    order = _paid_order(db, m)
+    if tax is None:
+        tax = _tax_for(m, amount, final=amount == outstanding_release(m) and held_cents(m) == 0)
+    creator_user = _creator_user(db, project)
+    allocation = _reverse_release(m, amount, creator_user)
+    owners = {ledger.creator_payable(creator_user): creator_user}
+    if m.affiliate_user_id:
+        owners[ledger.affiliate_payable(m.affiliate_user_id)] = m.affiliate_user_id
+    memo = f"milestone {m.id}"
+    entries = [ledger.dr(code, cents, memo, owners.get(code)) for code, cents in allocation.items()]
+    entries += [ledger.dr("tax_payable", tax, memo), ledger.cr(f"clearing:{order.provider}", amount + tax, memo)]
+    m.tax_refunded_cents += tax
+    refund = _record_refund(db, provider, m, order, _refund_seq_key(db, m), entries, amount + tax, reason, note,
+                            actor_id)
+    db.flush()
+    adjust_earnings(db, spread_over_earnings(db, list(db.scalars(select(Earning).where(
+        Earning.milestone_id == m.id))), allocation), refund.journal_id)
+
+
+def refund_milestone_amount(db: Session, provider: PaymentProvider | None, m: Milestone, project: Project,
+                            total: int, reason: RefundReason, note: str, actor_id=None) -> None:
+    """Refund ``total`` (price + tax) of a milestone: held funds first, then
+    released funds. Used for refunds issued at the provider and by finance."""
+    remaining_pre = held_cents(m) + outstanding_release(m)
+    remaining_tax = m.tax_cents - m.tax_refunded_cents
+    if total <= 0 or total > remaining_pre + remaining_tax:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Refund exceeds what is refundable on this milestone")
+    if total == remaining_pre + remaining_tax:
+        pre, tax = remaining_pre, remaining_tax
+    else:
+        pre = (total * remaining_pre) // (remaining_pre + remaining_tax)
+        tax = total - pre
+    from_held = min(pre, held_cents(m))
+    from_released = pre - from_held
+    tax_held = (tax * from_held) // pre if pre else tax
+    refund_held(db, provider, m, project, from_held, reason, note, actor_id, tax=tax_held)
+    refund_released(db, provider, m, project, from_released, reason, note, actor_id, tax=tax - tax_held)
+    if m.status in HELD and held_cents(m) == 0 and m.released_cents == 0:
+        m.status, m.auto_approve_at = MilestoneStatus.refunded, None
+        refresh_project_status(project)
+
+
+def external_milestone_refund(db: Session, order: Order, delta: int) -> None:
+    """A refund issued at the payment provider for a milestone payment."""
+    m = db.get(Milestone, order.milestone_id)
+    if order.status is OrderStatus.refunded:
+        return
+    refund_milestone_amount(db, None, m, m.project, delta, RefundReason.other,
+                            "Refund issued at the payment provider", None)
+    notify(db, _creator_user(db, m.project), "milestone_refunded", f"Refund recorded: {m.title}",
+           f"{delta / 100:,.2f} {order.currency} was refunded to the client.", f"/projects/{m.project_id}",
+           send_email=True)
 
 
 def approve(db: Session, m: Milestone, project: Project, actor_id=None, auto: bool = False) -> None:
     if m.status is not MilestoneStatus.submitted:
         raise HTTPException(status.HTTP_409_CONFLICT, "Only delivered milestones can be approved")
-    release(db, m, project, m.amount_cents, actor_id, "auto-approved" if auto else "approved")
+    release(db, m, project, held_cents(m), actor_id, "auto-approved" if auto else "approved")
     m.status, m.approved_at, m.auto_approve_at = MilestoneStatus.approved, now(), None
     refresh_project_status(project)
     notify(db, _creator_user(db, project), "milestone_approved", f"Milestone approved: {m.title}",
@@ -525,7 +693,7 @@ def approve(db: Session, m: Milestone, project: Project, actor_id=None, auto: bo
 def creator_refund(db: Session, provider: PaymentProvider, m: Milestone, project: Project, user: User, note: str):
     if m.status not in (MilestoneStatus.funded, MilestoneStatus.submitted, MilestoneStatus.revision_requested):
         raise HTTPException(status.HTTP_409_CONFLICT, "Only held milestones can be refunded")
-    refund_held(db, provider, m, project, m.amount_cents, RefundReason.project_canceled, note, user.id)
+    refund_held(db, provider, m, project, held_cents(m), RefundReason.project_canceled, note, user.id)
     m.status, m.auto_approve_at = MilestoneStatus.refunded, None
     refresh_project_status(project)
     notify(db, project.client_user_id, "milestone_refunded", f"Refund issued: {m.title}", note[:300],
@@ -578,18 +746,19 @@ def resolve_dispute(db: Session, provider: PaymentProvider, dispute: ProjectDisp
         raise HTTPException(status.HTTP_409_CONFLICT, "Dispute is already closed")
     m = db.get(Milestone, dispute.milestone_id)
     project = m.project
+    held = held_cents(m)
     if outcome == "release":
-        to_creator = m.amount_cents
+        to_creator = held
     elif outcome == "refund":
         to_creator = 0
     elif outcome == "split":
         if creator_share_bps is None or not 0 < creator_share_bps < 10_000:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "A split needs a creator share between 1 and 9999 bps")
-        to_creator = (m.amount_cents * creator_share_bps + 5_000) // 10_000
+        to_creator = (held * creator_share_bps + 5_000) // 10_000
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Outcome must be release, refund or split")
     release(db, m, project, to_creator, admin.id, "dispute resolution")
-    refund_held(db, provider, m, project, m.amount_cents - to_creator, RefundReason.dispute_resolution, note, admin.id)
+    refund_held(db, provider, m, project, held - to_creator, RefundReason.dispute_resolution, note, admin.id)
     m.status = MilestoneStatus.approved if to_creator else MilestoneStatus.refunded
     m.approved_at = now() if to_creator else None
     dispute.status = {"release": DisputeStatus.resolved_release, "refund": DisputeStatus.resolved_refund,
@@ -613,37 +782,82 @@ def auto_approve_due(db: Session) -> int:
 
 
 def chargeback_milestone(db: Session, order: Order, dispute_id: str) -> None:
-    """A card chargeback on a milestone payment: pull back held or released funds."""
+    """A card chargeback on a milestone payment: pull back held and released
+    funds that are still outstanding, and remember what was pulled back."""
+    from app.services.payment_service import adjust_earnings, spread_over_earnings
+
     m = db.get(Milestone, order.milestone_id)
+    if order.status is OrderStatus.refunded:
+        order.status = OrderStatus.disputed  # e.g. a duplicate payment: nothing of it is held
+        return
     project = m.project
-    held = m.amount_cents - m.released_cents - m.refunded_cents
+    creator_user = _creator_user(db, project)
+    held = held_cents(m)
+    snapshot = {"held": held, "creator": m.release_creator_cents, "affiliate": m.release_affiliate_cents,
+                "platform": m.release_platform_cents, "tax": m.tax_cents - m.tax_refunded_cents,
+                "status": m.status.value, "order_status": order.status.value}
+    memo = f"milestone {m.id}"
     entries = []
     if held > 0:
-        entries.append(ledger.dr("client_funds_held", held, f"milestone {m.id}"))
-    if m.released_cents:
-        alloc = engine.calculate(engine.RoyaltyInput(
-            gross_cents=m.released_cents, rule=share_rule(db.get(RevenueShareRule, project.commission_rule_id)),
-            creator_party_id="creator"))
-        creator_user = _creator_user(db, project)
-        entries += [ledger.dr(ledger.creator_payable(creator_user), alloc.creator_pool_cents, f"milestone {m.id}",
-                              creator_user),
-                    ledger.dr("platform_revenue", alloc.platform_net_cents, f"milestone {m.id}")]
-    returned = held + m.released_cents
-    tax = (m.tax_cents * returned) // m.amount_cents if m.amount_cents else 0
-    entries += [ledger.dr("tax_payable", tax), ledger.cr(f"clearing:{order.provider}", returned + tax, dispute_id)]
+        entries.append(ledger.dr("client_funds_held", held, memo))
+    released = outstanding_release(m)
+    allocation = _reverse_release(m, released, creator_user) if released else {}
+    m.reversed_release_cents -= released  # a chargeback is not a refund; tracked in the snapshot
+    owners = {ledger.creator_payable(creator_user): creator_user}
+    if m.affiliate_user_id:
+        owners[ledger.affiliate_payable(m.affiliate_user_id)] = m.affiliate_user_id
+    entries += [ledger.dr(code, cents, memo, owners.get(code)) for code, cents in allocation.items()]
+    tax = snapshot["tax"]
+    entries += [ledger.dr("tax_payable", tax, memo),
+                ledger.cr(f"clearing:{order.provider}", held + released + tax, dispute_id)]
     journal = ledger.post(db, JournalKind.dispute, f"dispute:{dispute_id}:{m.id}", "milestone", m.id,
                           f"Chargeback {dispute_id}", order.currency, entries)
-    from app.services.payment_service import reverse_earning_rows
-
-    reverse_earning_rows(db, list(db.scalars(select(Earning).where(Earning.milestone_id == m.id,
-                                                                   Earning.amount_cents > 0))), journal.id)
+    adjust_earnings(db, spread_over_earnings(db, list(db.scalars(select(Earning).where(
+        Earning.milestone_id == m.id))), allocation), journal.id)
+    m.chargeback_snapshot = snapshot
     m.status, m.auto_approve_at = MilestoneStatus.refunded, None
     m.refunded_cents += held
+    m.tax_refunded_cents += tax
     order.status = OrderStatus.disputed
     refresh_project_status(project)
-    notify(db, _creator_user(db, project), "chargeback", f"Payment disputed by the bank: {m.title}",
+    notify(db, creator_user, "chargeback", f"Payment disputed by the bank: {m.title}",
            "The client's bank reversed this payment. Contact support if you have evidence of delivery.",
            f"/projects/{project.id}", send_email=True)
+
+
+def reinstate_milestone(db: Session, order: Order, dispute_id: str) -> None:
+    """Dispute won: restore exactly what the chargeback pulled back. Held funds
+    are held again; released shares come back as fresh pending earnings."""
+    m = db.get(Milestone, order.milestone_id)
+    snap = m.chargeback_snapshot
+    reversed_journal = db.scalar(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == f"dispute:{dispute_id}:{m.id}"))
+    if not snap or not reversed_journal:
+        order.status = OrderStatus.paid
+        return
+    entries = [ledger.Line(e.account.code, debit=e.credit_cents, credit=e.debit_cents, memo=f"dispute won {dispute_id}",
+                           owner_user_id=e.account.owner_user_id) for e in reversed_journal.entries]
+    journal = ledger.post(db, JournalKind.dispute_reinstated, f"dispute-won:{dispute_id}:{m.id}", "milestone", m.id,
+                          f"Dispute won {dispute_id}", order.currency, entries)
+    available_at = now() + timedelta(days=get_settings().earnings_hold_days)
+    for payee, kind, cents in ((_creator_user(db, m.project), EarningKind.service_milestone, snap["creator"]),
+                               (m.affiliate_user_id, EarningKind.affiliate_commission, snap["affiliate"])):
+        if cents:
+            db.add(Earning(payee_user_id=payee, kind=kind, milestone_id=m.id, amount_cents=cents,
+                           currency=order.currency, status=EarningStatus.pending, available_at=available_at,
+                           journal_id=journal.id))
+    m.release_creator_cents += snap["creator"]
+    m.release_affiliate_cents += snap["affiliate"]
+    m.release_platform_cents += snap["platform"]
+    m.refunded_cents -= snap["held"]
+    m.tax_refunded_cents -= snap["tax"]
+    m.status = MilestoneStatus(snap["status"])
+    if m.status is MilestoneStatus.submitted:
+        m.auto_approve_at = now() + timedelta(days=get_settings().milestone_auto_approve_days)
+    m.chargeback_snapshot = None
+    order.status = OrderStatus(snap["order_status"])
+    refresh_project_status(m.project)
+    audit.record(db, "production.dispute_won", None, "milestone", m.id, dispute=dispute_id)
 
 
 # --- Reviews ---------------------------------------------------------------------------------

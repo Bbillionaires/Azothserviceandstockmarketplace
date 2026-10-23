@@ -22,6 +22,7 @@ from app.models import (
 from app.schemas.admin import AppealIn, ComplaintIn, CounterNoticeIn
 from app.schemas.common import Message
 from app.services import audit
+from app.services.captcha import require_captcha
 
 router = APIRouter(tags=["trust"])
 
@@ -30,12 +31,14 @@ router = APIRouter(tags=["trust"])
 def file_complaint(body: ComplaintIn, request: Request, user: User | None = Depends(optional_user),
                    db: Session = Depends(get_db)):
     limiter.check(f"complaint:{client_ip(request)}", 10, 3600)
+    require_captcha(body.captcha_token, client_ip(request))
     if not (body.good_faith_statement and body.accuracy_statement):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "A valid notice requires the good-faith and accuracy statements")
     if not db.get(MediaAsset, body.asset_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Media not found")
-    complaint = CopyrightComplaint(complainant_user_id=user.id if user else None, **body.model_dump())
+    complaint = CopyrightComplaint(complainant_user_id=user.id if user else None,
+                                   **body.model_dump(exclude={"captcha_token"}))
     db.add(complaint)
     db.flush()
     audit.record(db, "copyright.complaint_received", user.id if user else None, "copyright_complaint",

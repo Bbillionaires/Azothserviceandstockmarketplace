@@ -39,6 +39,7 @@ ACCOUNT_TYPES = {
     "fee_recovery": AccountType.revenue,
     "processing_fees": AccountType.expense,
     "refund_losses": AccountType.expense,
+    "referral_bonuses": AccountType.expense,
 }
 
 

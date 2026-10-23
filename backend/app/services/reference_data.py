@@ -72,9 +72,12 @@ RULES = [
 
 # Custom production commission. 85% to the creator is a placeholder business
 # decision; finance admins change it by creating a new rule version.
-SERVICES_RULE = ("services_commission", RevenueModel.service, 8500,
-                 "Custom production: creator receives 85% of each released milestone; the platform pays "
-                 "payment processing fees from its 15% commission.")
+SERVICES_RULE = ("services_commission", RevenueModel.service, 8500, 1000,
+                 "Custom production and gallery sales: creator receives 85%; the platform pays payment "
+                 "processing fees from its 15% commission, and pays 10% of that commission to the "
+                 "client's referrer during the attribution window.")
+SERVICES_RULE_V1_NOTES = ("Custom production: creator receives 85% of each released milestone; the platform pays "
+                          "payment processing fees from its 15% commission.")
 
 DRAFT_BANNER = (
     "> **DRAFT — NOT LEGALLY REVIEWED.** Placeholder text for development only. "
@@ -148,9 +151,16 @@ def seed_reference_data(db: Session) -> None:
                 legal_review_status=LegalReviewStatus.draft,
             ))
     db.commit()
-    code, model, creator_bps, notes = SERVICES_RULE
-    if not db.scalar(select(RevenueShareRule).where(RevenueShareRule.code == code)):
-        db.add(RevenueShareRule(code=code, version=1, revenue_model=model, creator_bps=creator_bps,
-                                initial_exclusive_creator_bps=None, affiliate_bps_of_platform=0,
+    code, model, creator_bps, aff_bps, notes = SERVICES_RULE
+    latest = db.scalar(select(RevenueShareRule).where(RevenueShareRule.code == code)
+                       .order_by(RevenueShareRule.version.desc()))
+    # New installs get the current rule. An install still on the untouched
+    # Phase 3 seed (no referral commission) gets it as version 2; a version a
+    # finance admin created is left alone. Projects keep their snapshotted rule.
+    untouched_v1 = (latest is not None and latest.version == 1 and latest.affiliate_bps_of_platform == 0
+                    and latest.created_by is None and latest.notes == SERVICES_RULE_V1_NOTES)
+    if latest is None or untouched_v1:
+        db.add(RevenueShareRule(code=code, version=2 if latest else 1, revenue_model=model, creator_bps=creator_bps,
+                                initial_exclusive_creator_bps=None, affiliate_bps_of_platform=aff_bps,
                                 net_revenue_deductions=[], notes=notes))
         db.commit()

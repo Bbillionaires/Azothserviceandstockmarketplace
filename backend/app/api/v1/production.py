@@ -417,9 +417,10 @@ def project_out(db: Session, project: Project, role: str) -> dict:
             "amount_cents": m.amount_cents, "due_date": m.due_date, "status": m.status.value,
             "funded_at": m.funded_at, "submitted_at": m.submitted_at, "auto_approve_at": m.auto_approve_at,
             "approved_at": m.approved_at, "revisions_used": m.revisions_used, "released_cents": m.released_cents,
-            "refunded_cents": m.refunded_cents,
+            "refunded_cents": m.refunded_cents + m.reversed_release_cents,
             "deliverables": [{"id": d.id, "filename": d.filename, "size_bytes": d.size_bytes,
-                              "content_type": d.content_type, "note": d.note, "created_at": d.created_at}
+                              "content_type": d.content_type, "note": d.note, "created_at": d.created_at,
+                              "scan_status": d.scan_status}
                              for d in deliverables],
             "revision_requests": [{"note": r.note, "created_at": r.created_at} for r in revisions],
         })
@@ -543,6 +544,8 @@ def deliverable_link(deliverable_id: uuid.UUID, user: User = Depends(current_use
     if not d:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
     m, project, role = svc.load_milestone(db, d.milestone_id, user)
+    if d.scan_status == "pending":  # a direct upload whose scan job has not finished
+        raise HTTPException(status.HTTP_409_CONFLICT, "This file is still being scanned; try again shortly")
     # Clients can preview deliveries before approving; files are watermark-free originals,
     # which is why funds are already held before the creator delivers.
     audit.record(db, "production.deliverable_link", user.id, "deliverable", d.id, role=role)
